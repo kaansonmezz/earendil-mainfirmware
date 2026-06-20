@@ -1,0 +1,6 @@
+../Core/Src/motor_dispatcher.c:11:6:MotorDispatcher_Init	16	static
+../Core/Src/motor_dispatcher.c:19:6:MotorDispatcher_Send	48	static
+../Core/Src/motor_dispatcher.c:60:6:MotorDispatcher_SendAll	24	static
+../Core/Src/motor_dispatcher.c:68:6:MotorDispatcher_SendRaw	120	static
+../Core/Src/motor_dispatcher.c:91:14:MotorDispatcher_GetLink	16	static
+../Core/Src/motor_dispatcher.c:99:6:MotorDispatcher_Update	16	static

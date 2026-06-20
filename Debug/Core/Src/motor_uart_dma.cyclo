@@ -1,0 +1,9 @@
+../Core/Src/motor_uart_dma.c:55:12:LookupSlot	5
+../Core/Src/motor_uart_dma.c:65:13:ReportUartError	8
+../Core/Src/motor_uart_dma.c:98:13:ProcessDmaRestart	22
+../Core/Src/motor_uart_dma.c:122:26:StartDmaRx	19
+../Core/Src/motor_uart_dma.c:149:6:MotorUartDma_Init	2
+../Core/Src/motor_uart_dma.c:170:6:MotorUartDma_StartAllRx	1
+../Core/Src/motor_uart_dma.c:178:6:MotorUartDma_Update	9
+../Core/Src/motor_uart_dma.c:228:6:HAL_UARTEx_RxEventCallback	23
+../Core/Src/motor_uart_dma.c:265:6:HAL_UART_ErrorCallback	3

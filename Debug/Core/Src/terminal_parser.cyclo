@@ -1,0 +1,2 @@
+../Core/Src/terminal_parser.c:12:13:allDigits	4
+../Core/Src/terminal_parser.c:24:6:TerminalParser_Parse	41

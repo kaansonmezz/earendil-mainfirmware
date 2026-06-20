@@ -1,0 +1,4 @@
+../Core/Src/safety_manager.c:13:6:SafetyManager_Init	1
+../Core/Src/safety_manager.c:19:6:SafetyManager_Update	5
+../Core/Src/safety_manager.c:41:6:SafetyManager_NotifyRx	2
+../Core/Src/safety_manager.c:50:6:SafetyManager_IsLinkLost	2

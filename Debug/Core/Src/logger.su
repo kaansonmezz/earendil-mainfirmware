@@ -1,0 +1,4 @@
+../Core/Src/logger.c:14:6:Logger_Init	8	static
+../Core/Src/logger.c:19:6:Logger_Log	28	static
+../Core/Src/logger.c:38:6:Logger_LogMotorCmd	64	static
+../Core/Src/logger.c:45:6:Logger_LogAck	56	static
