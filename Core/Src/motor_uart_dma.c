@@ -1,4 +1,6 @@
 #include "motor_uart_dma.h"
+#include "motor_tx_dma.h"
+#include "safety_manager.h"
 #include "logger.h"
 #include <string.h>
 
@@ -59,6 +61,20 @@ static int LookupSlot(UART_HandleTypeDef *huart)
     if (huart->Instance == UART5)  return 2;
     if (huart->Instance == UART7)  return 3;
     return -1;
+}
+
+/* ── Map UART handle → MotorId_t for safety manager ─────────────────────── */
+static bool GetMotorIdFromUart(UART_HandleTypeDef *huart, MotorId_t *motor)
+{
+    if (huart == NULL || motor == NULL)
+        return false;
+
+    if (huart->Instance == USART2) { *motor = MOTOR_FL; return true; }
+    if (huart->Instance == UART4)  { *motor = MOTOR_FR; return true; }
+    if (huart->Instance == UART7)  { *motor = MOTOR_RL; return true; }
+    if (huart->Instance == UART5)  { *motor = MOTOR_RR; return true; }
+
+    return false;
 }
 
 /* ── Error report (main-loop context only) ─────────────────────────────── */
@@ -238,6 +254,15 @@ void HAL_UARTEx_RxEventCallback(UART_HandleTypeDef *huart, uint16_t Size)
         rxSlot[idx].msg[copyLen] = '\0';
         rxSlot[idx].size = copyLen;
         rxSlot[idx].ready = true;
+
+        /* Notify safety manager of motor RX activity for link-loss tracking.
+         * Safe to call from ISR: SafetyManager_NotifyRx() only writes a tick
+         * value and clears a flag — no logging, no blocking. */
+        MotorId_t motor;
+        if (GetMotorIdFromUart(huart, &motor))
+        {
+            SafetyManager_NotifyRx(motor);
+        }
     }
 
     if (diag[idx].error_active)
@@ -280,6 +305,20 @@ void HAL_UART_ErrorCallback(UART_HandleTypeDef *huart)
         d->immediate_report_pending = true;
 
     d->restart_pending = true;
+
+    /* Route TX DMA errors to motor_tx_dma.c.
+     * Only clear TX busy state when a DMA transfer error occurred AND the UART
+     * was actively transmitting. Pure RX errors (FE/NE/ORE/PE) must NOT clear
+     * a valid TX busy flag — those are handled by the RX recovery path above. */
+    bool dmaError = ((error & HAL_UART_ERROR_DMA) != 0U);
+    bool txWasActive =
+        (huart->gState == HAL_UART_STATE_BUSY_TX) ||
+        (huart->gState == HAL_UART_STATE_BUSY_TX_RX);
+
+    if (dmaError && txWasActive)
+    {
+        MotorTxDma_OnTxError(huart);
+    }
 
     __HAL_UART_CLEAR_FLAG(huart, UART_CLEAR_OREF | UART_CLEAR_NEF |
                                   UART_CLEAR_PEF  | UART_CLEAR_FEF);

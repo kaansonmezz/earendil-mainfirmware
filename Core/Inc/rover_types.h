@@ -46,12 +46,8 @@ typedef struct
     uint8_t     speed;   /* 0–255 */
 } MotionCmd_t;
 
-/* ── Control mode ───────────────────────────────────────────────────────── */
-typedef enum
-{
-    MODE_RPM = 0,
-    MODE_PWM
-} ControlMode_t;
+/* ── Control mode (RPM / PWM) ─────────────────────────────────────────────── */
+/* Defined in control_mode.h */
 
 /* ── ACK status ─────────────────────────────────────────────────────────── */
 typedef enum

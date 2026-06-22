@@ -1,6 +1,7 @@
 #include "motor_dispatcher.h"
 #include "motor_protocol.h"
 #include "app_config.h"
+#include "motor_tx_dma.h"
 #include "logger.h"
 #include <string.h>
 #include <stdio.h>
@@ -26,16 +27,11 @@ void MotorDispatcher_Send(MotorId_t id, const MotorCmd_t *cmd)
     if (frameLen == 0)
         return;
 
-    UART_HandleTypeDef *huart = MOTOR_UART_HANDLE(id);
-
-    if (huart == NULL)
-        return;
-
     motorLinks[id].lastTxTick = HAL_GetTick();
     motorLinks[id].state      = LINK_WAIT_ACK;
     motorLinks[id].retryCount = 0;
 
-    if (HAL_UART_Transmit(huart, (uint8_t *)txBuf, frameLen, 100) != HAL_OK)
+    if (!MotorTxDma_Send(id, txBuf))
     {
         Logger_Log(LOG_ERROR, "UART TX failed for motor %d", id);
         return;
@@ -74,17 +70,19 @@ void MotorDispatcher_SendRaw(const char *msg)
 
     for (int i = 0; i < MOTOR_COUNT; i++)
     {
-        UART_HandleTypeDef *huart = MOTOR_UART_HANDLE((MotorId_t)i);
-        if (huart == NULL)
-            continue;
-
         char frame[64];
         int len = snprintf(frame, sizeof(frame), "%s\r\n", msg);
         if (len <= 0 || (uint16_t)len >= sizeof(frame))
             continue;
 
-        HAL_UART_Transmit(huart, (uint8_t *)frame, (uint16_t)len, 100);
-        Logger_Log(LOG_INFO, "[TX][%s] %s", names[i], msg);
+        if (MotorTxDma_Send((MotorId_t)i, frame))
+        {
+            Logger_Log(LOG_INFO, "[TX][%s] %s", names[i], msg);
+        }
+        else
+        {
+            Logger_Log(LOG_ERROR, "UART TX failed for motor %s raw", names[i]);
+        }
     }
 }
 

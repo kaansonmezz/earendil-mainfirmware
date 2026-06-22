@@ -1,6 +1,6 @@
 Core/Src/safety_manager.o: ../Core/Src/safety_manager.c \
  ../Core/Inc/safety_manager.h ../Core/Inc/rover_types.h \
- ../Core/Inc/motion_controller.h ../Core/Inc/app_config.h \
+ ../Core/Inc/app_config.h \
  ../Drivers/STM32H7xx_HAL_Driver/Inc/stm32h7xx_hal.h \
  ../Core/Inc/stm32h7xx_hal_conf.h \
  ../Drivers/STM32H7xx_HAL_Driver/Inc/stm32h7xx_hal_rcc.h \
@@ -35,7 +35,6 @@ Core/Src/safety_manager.o: ../Core/Src/safety_manager.c \
  ../Core/Inc/logger.h
 ../Core/Inc/safety_manager.h:
 ../Core/Inc/rover_types.h:
-../Core/Inc/motion_controller.h:
 ../Core/Inc/app_config.h:
 ../Drivers/STM32H7xx_HAL_Driver/Inc/stm32h7xx_hal.h:
 ../Core/Inc/stm32h7xx_hal_conf.h:

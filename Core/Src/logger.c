@@ -7,7 +7,7 @@
 /* ── Private variables ──────────────────────────────────────────────────── */
 static char txBuf[TERMINAL_TX_BUF_SIZE];
 
-static const char *levelStr[] = { "INFO", "WARN", "ERROR", "DEBUG" };
+static const char *levelStr[] = { "INFO", "WARN", "ERROR", "DEBUG", "BOOT" };
 
 /* ── Public functions ───────────────────────────────────────────────────── */
 

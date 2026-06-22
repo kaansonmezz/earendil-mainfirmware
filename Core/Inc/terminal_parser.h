@@ -9,24 +9,28 @@ typedef enum
     TCMD_NONE = 0,
     TCMD_HELP,          /* help */
     TCMD_STOP,          /* stop */
-    TCMD_BRAKE,         /* brake → send x to all motors */
+    TCMD_BRAKE,         /* brake -> send x to all motors */
     TCMD_IDENTIFY,      /* identify */
     TCMD_STATUS,        /* status */
     TCMD_MODE_RPM,      /* mode rpm */
     TCMD_MODE_PWM,      /* mode pwm */
     TCMD_MODE_QUERY,    /* mode (print current) */
     TCMD_MOTION         /* f/b/r/l/fd/bd/rd/ld + value */
-} TerminalCmdType_t;
+} TerminalCommandType_t;
 
 /* ── Parse result ────────────────────────────────────────────────────────── */
 typedef struct
 {
-    TerminalCmdType_t type;
-    MotionCmd_t       motion;   /* valid when type == TCMD_MOTION */
-    bool              isDuty;   /* true for fd/bd/rd/ld, false for f/b/r/l */
-} TerminalResult_t;
+    TerminalCommandType_t type;
+    MotionCmd_t   motion;        /* direction + clamped speed (TCMD_MOTION / TCMD_STOP) */
+    bool          isDuty;        /* true for fd/bd/rd/ld, false for f/b/r/l */
+    uint16_t      value;         /* clamped numeric value */
+    uint16_t      originalValue; /* raw numeric value before clamping */
+    bool          hasValue;      /* true if a numeric value was parsed */
+    bool          wasClamped;    /* true if value was clamped to its allowed range */
+} TerminalCommand_t;
 
 /* ── Public API ─────────────────────────────────────────────────────────── */
-bool TerminalParser_Parse(const char *line, TerminalResult_t *outResult);
+bool TerminalParser_Parse(const char *line, TerminalCommand_t *outResult);
 
 #endif /* TERMINAL_PARSER_H */

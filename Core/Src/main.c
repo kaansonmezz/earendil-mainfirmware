@@ -21,15 +21,7 @@
 
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
-#include "app_config.h"
-#include "terminal_if.h"
-#include "terminal_parser.h"
-#include "motion_controller.h"
-#include "motor_dispatcher.h"
-#include "ack_manager.h"
-#include "safety_manager.h"
-#include "logger.h"
-#include "motor_uart_dma.h"
+#include "app_main.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -55,13 +47,15 @@ UART_HandleTypeDef huart7;
 UART_HandleTypeDef huart2;
 UART_HandleTypeDef huart3;
 DMA_HandleTypeDef hdma_uart4_rx;
+DMA_HandleTypeDef hdma_uart4_tx;
 DMA_HandleTypeDef hdma_uart5_rx;
+DMA_HandleTypeDef hdma_uart5_tx;
 DMA_HandleTypeDef hdma_uart7_rx;
+DMA_HandleTypeDef hdma_uart7_tx;
 DMA_HandleTypeDef hdma_usart2_rx;
+DMA_HandleTypeDef hdma_usart2_tx;
 
 /* USER CODE BEGIN PV */
-static TerminalResult_t termResult;
-static ControlMode_t    controlMode = MODE_RPM;
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -122,18 +116,7 @@ int main(void)
   MX_USART2_UART_Init();
   MX_USART3_UART_Init();
   /* USER CODE BEGIN 2 */
-  Logger_Init();
-  TerminalIf_Init();
-  MotionController_Init();
-  MotorDispatcher_Init();
-  AckManager_Init();
-  SafetyManager_Init();
-
-  MotorUartDma_Init();
-  MotorUartDma_StartAllRx();
-
-  Logger_Log(LOG_INFO, "H723 HAL project started");
-  Logger_Log(LOG_INFO, "Commands: f/b/r/l<0-200> fduty/bduty/rduty/lduty<0-255> stop brake identify status mode rpm|pwm");
+  App_Init();
   /* USER CODE END 2 */
 
   /* Infinite loop */
@@ -143,109 +126,7 @@ int main(void)
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
-    /* ── Terminal command processing ─────────────────────────────── */
-    if (TerminalIf_LineReady())
-    {
-        const char *line = TerminalIf_GetLine();
-        Logger_Log(LOG_INFO, "CMD: %s", line);
-
-        if (TerminalParser_Parse(line, &termResult))
-        {
-            switch (termResult.type)
-            {
-                case TCMD_STOP:
-                    MotionController_Execute(&termResult.motion);
-                    break;
-
-                case TCMD_MOTION:
-                    if (termResult.isDuty && controlMode != MODE_PWM)
-                    {
-                        Logger_Log(LOG_ERROR, "Invalid mode: duty commands require PWM mode");
-                    }
-                    else if (!termResult.isDuty && controlMode != MODE_RPM)
-                    {
-                        Logger_Log(LOG_ERROR, "Invalid mode: RPM commands require RPM mode");
-                    }
-                    else
-                    {
-                        MotionController_Execute(&termResult.motion);
-                    }
-                    break;
-
-                case TCMD_BRAKE:
-                    MotorDispatcher_SendRaw("x");
-                    break;
-
-                case TCMD_MODE_RPM:
-                    controlMode = MODE_RPM;
-                    Logger_Log(LOG_INFO, "Control mode set to RPM");
-                    MotorDispatcher_SendRaw("mode rpm");
-                    break;
-
-                case TCMD_MODE_PWM:
-                    controlMode = MODE_PWM;
-                    Logger_Log(LOG_INFO, "Control mode set to PWM");
-                    MotorDispatcher_SendRaw("mode pwm");
-                    break;
-
-                case TCMD_MODE_QUERY:
-                    Logger_Log(LOG_INFO, "Current mode: %s",
-                               (controlMode == MODE_RPM) ? "RPM" : "PWM");
-                    break;
-
-                case TCMD_IDENTIFY:
-                    MotorDispatcher_SendRaw("identify");
-                    break;
-
-                case TCMD_STATUS:
-                    MotorDispatcher_SendRaw("status");
-                    break;
-
-                case TCMD_HELP:
-                    Logger_Log(LOG_INFO, "Available commands:");
-                    Logger_Log(LOG_INFO, "");
-                    Logger_Log(LOG_INFO, "Modes:");
-                    Logger_Log(LOG_INFO, "  mode             Show current mode");
-                    Logger_Log(LOG_INFO, "  mode rpm         Set RPM mode and forward \"mode rpm\"");
-                    Logger_Log(LOG_INFO, "  mode pwm         Set PWM mode and forward \"mode pwm\"");
-                    Logger_Log(LOG_INFO, "");
-                    Logger_Log(LOG_INFO, "RPM mode commands:");
-                    Logger_Log(LOG_INFO, "  f0..f200         Forward RPM command");
-                    Logger_Log(LOG_INFO, "  b0..b200         Backward RPM command");
-                    Logger_Log(LOG_INFO, "  r0..r200         Right turn RPM command");
-                    Logger_Log(LOG_INFO, "  l0..l200         Left turn RPM command");
-                    Logger_Log(LOG_INFO, "");
-                    Logger_Log(LOG_INFO, "PWM mode commands:");
-                    Logger_Log(LOG_INFO, "  fd0..fd255       Forward PWM/duty command");
-                    Logger_Log(LOG_INFO, "  bd0..bd255       Backward PWM/duty command");
-                    Logger_Log(LOG_INFO, "  rd0..rd255       Right turn PWM/duty command");
-                    Logger_Log(LOG_INFO, "  ld0..ld255       Left turn PWM/duty command");
-                    Logger_Log(LOG_INFO, "");
-                    Logger_Log(LOG_INFO, "Common commands:");
-                    Logger_Log(LOG_INFO, "  stop             Send stop command");
-                    Logger_Log(LOG_INFO, "  brake            Send brake command: x");
-                    Logger_Log(LOG_INFO, "  identify         Send identify to all motor UARTs");
-                    Logger_Log(LOG_INFO, "  status           Send status to all motor UARTs");
-                    Logger_Log(LOG_INFO, "  help             Show this command list");
-                    break;
-
-                default:
-                    break;
-            }
-        }
-        else
-        {
-            Logger_Log(LOG_ERROR, "Unknown command: %s", line);
-        }
-    }
-
-    /* ── Motor dispatcher / ACK / safety housekeeping ───────────── */
-    MotorDispatcher_Update();
-    AckManager_Update();
-    SafetyManager_Update();
-
-    /* ── Motor UART DMA RX debug processing ────────────────────── */
-    MotorUartDma_Update();
+    App_Update();
   }
   /* USER CODE END 3 */
 }
@@ -453,7 +334,7 @@ static void MX_UART7_Init(void)
 }
 
 /**
-  * @brief 	Initialization Function
+  * @brief USART2 Initialization Function
   * @param None
   * @retval None
   */
@@ -570,6 +451,18 @@ static void MX_DMA_Init(void)
   /* DMA1_Stream3_IRQn interrupt configuration */
   HAL_NVIC_SetPriority(DMA1_Stream3_IRQn, 5, 0);
   HAL_NVIC_EnableIRQ(DMA1_Stream3_IRQn);
+  /* DMA1_Stream4_IRQn interrupt configuration */
+  HAL_NVIC_SetPriority(DMA1_Stream4_IRQn, 5, 0);
+  HAL_NVIC_EnableIRQ(DMA1_Stream4_IRQn);
+  /* DMA1_Stream5_IRQn interrupt configuration */
+  HAL_NVIC_SetPriority(DMA1_Stream5_IRQn, 5, 0);
+  HAL_NVIC_EnableIRQ(DMA1_Stream5_IRQn);
+  /* DMA1_Stream6_IRQn interrupt configuration */
+  HAL_NVIC_SetPriority(DMA1_Stream6_IRQn, 5, 0);
+  HAL_NVIC_EnableIRQ(DMA1_Stream6_IRQn);
+  /* DMA1_Stream7_IRQn interrupt configuration */
+  HAL_NVIC_SetPriority(DMA1_Stream7_IRQn, 5, 0);
+  HAL_NVIC_EnableIRQ(DMA1_Stream7_IRQn);
 
 }
 
@@ -623,21 +516,6 @@ void MPU_Config(void)
   MPU_InitStruct.IsBufferable = MPU_ACCESS_NOT_BUFFERABLE;
 
   HAL_MPU_ConfigRegion(&MPU_InitStruct);
-
-  MPU_InitStruct.Enable = MPU_REGION_ENABLE;
-  MPU_InitStruct.Number = MPU_REGION_NUMBER1;
-  MPU_InitStruct.BaseAddress = 0x30000000;
-  MPU_InitStruct.Size = MPU_REGION_SIZE_128KB;
-  MPU_InitStruct.SubRegionDisable = 0x00;
-  MPU_InitStruct.TypeExtField = MPU_TEX_LEVEL1;
-  MPU_InitStruct.AccessPermission = MPU_REGION_FULL_ACCESS;
-  MPU_InitStruct.DisableExec = MPU_INSTRUCTION_ACCESS_DISABLE;
-  MPU_InitStruct.IsShareable = MPU_ACCESS_SHAREABLE;
-  MPU_InitStruct.IsCacheable = MPU_ACCESS_NOT_CACHEABLE;
-  MPU_InitStruct.IsBufferable = MPU_ACCESS_NOT_BUFFERABLE;
-
-  HAL_MPU_ConfigRegion(&MPU_InitStruct);
-
   /* Enables the MPU */
   HAL_MPU_Enable(MPU_PRIVILEGED_DEFAULT);
 
@@ -649,26 +527,13 @@ void MPU_Config(void)
   */
 void Error_Handler(void)
 {
-  GPIO_InitTypeDef GPIO_InitStruct = {0};
-
-  __HAL_RCC_GPIOB_CLK_ENABLE();
-
-  GPIO_InitStruct.Pin = GPIO_PIN_14;
-  GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
-  GPIO_InitStruct.Pull = GPIO_NOPULL;
-  GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
-  HAL_GPIO_Init(GPIOB, &GPIO_InitStruct);
-
+  /* USER CODE BEGIN Error_Handler_Debug */
+  /* User can add his own implementation to report the HAL error return state */
   __disable_irq();
-
   while (1)
   {
-    HAL_GPIO_TogglePin(GPIOB, GPIO_PIN_14);
-
-    for (volatile uint32_t i = 0; i < 1000000; i++)
-    {
-    }
   }
+  /* USER CODE END Error_Handler_Debug */
 }
 #ifdef USE_FULL_ASSERT
 /**

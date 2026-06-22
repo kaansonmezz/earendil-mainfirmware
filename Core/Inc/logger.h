@@ -9,7 +9,8 @@ typedef enum
     LOG_INFO = 0,
     LOG_WARN,
     LOG_ERROR,
-    LOG_DEBUG
+    LOG_DEBUG,
+    LOG_BOOT
 } LogLevel_t;
 
 /* ── Public API ─────────────────────────────────────────────────────────── */

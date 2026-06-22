@@ -1,5 +1,4 @@
 #include "terminal_parser.h"
-#include "logger.h"
 #include <string.h>
 #include <stdlib.h>
 #include <ctype.h>
@@ -21,11 +20,37 @@ static bool allDigits(const char *str)
     return true;
 }
 
-bool TerminalParser_Parse(const char *line, TerminalResult_t *outResult)
+/* Common setup for a motion command. Stores both the clamped and original
+ * value plus clamping state. Does not execute or log anything. */
+static void FillMotion(TerminalCommand_t *out, Direction_t dir,
+                       int raw, int max)
+{
+    out->type          = TCMD_MOTION;
+    out->motion.direction = dir;
+
+    out->originalValue = (uint16_t)raw;
+    out->hasValue      = true;
+
+    if (raw > max)
+    {
+        out->value     = (uint16_t)max;
+        out->wasClamped = true;
+    }
+    else
+    {
+        out->value     = (uint16_t)raw;
+        out->wasClamped = false;
+    }
+
+    out->motion.speed  = (uint8_t)out->value;
+}
+
+bool TerminalParser_Parse(const char *line, TerminalCommand_t *outResult)
 {
     if (line == NULL || outResult == NULL)
         return false;
 
+    memset(outResult, 0, sizeof(*outResult));
     outResult->isDuty = false;
 
     char buf[MAX_LINE_LEN];
@@ -112,23 +137,18 @@ bool TerminalParser_Parse(const char *line, TerminalResult_t *outResult)
             return false;
 
         int val = atoi(valStr);
-        if (val > DUTY_MAX)
-        {
-            Logger_Log(LOG_WARN, "%c%c value %d clamped to %d", buf[0], buf[1], val, DUTY_MAX);
-            val = DUTY_MAX;
-        }
-
-        outResult->type = TCMD_MOTION;
         outResult->isDuty = true;
-        outResult->motion.speed = (uint8_t)val;
 
+        Direction_t dir = DIR_STOP;
         switch (buf[0])
         {
-            case 'f': outResult->motion.direction = DIR_FORWARD;  break;
-            case 'b': outResult->motion.direction = DIR_BACKWARD; break;
-            case 'r': outResult->motion.direction = DIR_RIGHT;    break;
-            case 'l': outResult->motion.direction = DIR_LEFT;     break;
+            case 'f': dir = DIR_FORWARD;  break;
+            case 'b': dir = DIR_BACKWARD; break;
+            case 'r': dir = DIR_RIGHT;    break;
+            case 'l': dir = DIR_LEFT;     break;
         }
+
+        FillMotion(outResult, dir, val, DUTY_MAX);
         return true;
     }
 
@@ -142,23 +162,17 @@ bool TerminalParser_Parse(const char *line, TerminalResult_t *outResult)
             if (allDigits(valStr))
             {
                 int val = atoi(valStr);
-                if (val > RPM_MAX)
-                {
-                    Logger_Log(LOG_WARN, "%c value %d clamped to %d", dir, val, RPM_MAX);
-                    val = RPM_MAX;
-                }
 
-                outResult->type = TCMD_MOTION;
-                outResult->isDuty = false;
-                outResult->motion.speed = (uint8_t)val;
-
+                Direction_t direction = DIR_STOP;
                 switch (dir)
                 {
-                    case 'f': outResult->motion.direction = DIR_FORWARD;  break;
-                    case 'b': outResult->motion.direction = DIR_BACKWARD; break;
-                    case 'r': outResult->motion.direction = DIR_RIGHT;    break;
-                    case 'l': outResult->motion.direction = DIR_LEFT;     break;
+                    case 'f': direction = DIR_FORWARD;  break;
+                    case 'b': direction = DIR_BACKWARD; break;
+                    case 'r': direction = DIR_RIGHT;    break;
+                    case 'l': direction = DIR_LEFT;     break;
                 }
+
+                FillMotion(outResult, direction, val, RPM_MAX);
                 return true;
             }
         }
