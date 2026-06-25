@@ -18,6 +18,7 @@ Run:
     python earendil.py
 """
 
+import re
 import sys
 import time
 import threading
@@ -95,6 +96,26 @@ class SerialReaderThread(QThread):
     def stop(self):
         self._running = False
         self.wait(2000)
+
+
+# ════════════════════════════════════════════════════════════════════════════
+#  H7 UART Error Log Parsing
+#  Matches firmware output from Core/Src/motor_uart_dma.c:
+#    [ERROR] <UART> UART error code: 0x00000004
+#    [ERROR] <UART> UART error still unresolved: 0x00000004
+#    [ERROR] <UART> error: <CODE> - <Description>
+#    [INFO]  <UART> RX recovered after UART error
+# ════════════════════════════════════════════════════════════════════════════
+_RE_UART_ERROR_CODE = re.compile(
+    r"^\[ERROR\]\s+(USART2|UART4|UART5|UART7)\s+"
+    r"UART error (?:code|still unresolved):\s+(0x[0-9A-Fa-f]+)$"
+)
+_RE_UART_ERROR_DECODED = re.compile(
+    r"^\[ERROR\]\s+(USART2|UART4|UART5|UART7)\s+error:\s+(.+)$"
+)
+_RE_UART_RECOVERED = re.compile(
+    r"^\[INFO\]\s+(USART2|UART4|UART5|UART7)\s+RX recovered after UART error$"
+)
 
 
 # ════════════════════════════════════════════════════════════════════════════
@@ -199,6 +220,55 @@ class EarendilControlGui(QMainWindow):
     PWM_MAX = 255
     VALUE_STEP = 5
 
+    # ── Motor table row index ─────────────────────────────────────────────
+    MOTOR_ROW = {"FL": 0, "FR": 1, "RL": 2, "RR": 3}
+
+    # ── UART → motor mapping (must match H7 firmware) ─────────────────────
+    #   app_config.h        : huart2=FL, huart4=FR, huart7=RL, huart5=RR
+    #   motor_uart_dma.c    : USART2=FL, UART4=FR,  UART7=RL,  UART5=RR
+    #   motor_tx_dma.c      : same mapping
+    UART_TO_MOTOR = {
+        "USART2": "FL",
+        "UART4":  "FR",
+        "UART7":  "RL",
+        "UART5":  "RR",
+    }
+
+    # Recognized UART error code prefixes (HAL UART error flags)
+    UART_ERROR_CODES = {"FE", "NE", "ORE", "PE", "DMA", "RTO"}
+
+    # ── Operating mode (DISARM / MANUAL / AUTONOMOUS) ─────────────────────
+    #   drive/control mode (RPM/PWM) is a separate concept handled by _set_mode.
+    #   Commands are sent over the same H7 terminal serial path as other cmds.
+    OPERATING_MODES = {
+        "disarm": {
+            "label": "DISARM",
+            "command": "mode disarm",
+            "color": "red",
+            "status_bg": "#B00020",
+            "status_fg": "#FFFFFF",
+            "led": "#E02020",
+        },
+        "manual": {
+            "label": "MANUAL",
+            "command": "mode manual",
+            "color": "yellow",
+            "status_bg": "#FFD66B",
+            "status_fg": "#101014",
+            "led": "#FFD66B",
+        },
+        "auto": {
+            "label": "AUTONOMOUS",
+            "command": "mode auto",
+            "color": "green",
+            "status_bg": "#1E8E3E",
+            "status_fg": "#FFFFFF",
+            "led": "#3CB371",
+        },
+    }
+    # Order of LEDs left→right: red, yellow, green
+    OPERATING_MODE_LED_KEYS = ("disarm", "manual", "auto")
+
     # Movement key priority: most-recently-pressed wins
     MOVE_KEYS = {
         Qt.Key_W: "W",
@@ -222,11 +292,19 @@ class EarendilControlGui(QMainWindow):
         self.current_rpm = self.DEFAULT_RPM
         self.current_pwm = self.DEFAULT_PWM
 
+        self._operating_mode = "disarm"          # "disarm" / "manual" / "auto"
+
         self._active_move_key: str | None = None   # current movement key (W/A/S/D)
         self._move_held: set[str] = set()          # held movement keys
         self._move_order: deque[str] = deque()     # movement key press order
         self._active_modifier: str | None = None   # "Shift" or "Ctrl" if held
         self._keys_held: set[str] = set()          # ALL held keys (prevents duplicates)
+
+        # ── Motor UART error tracking ─────────────────────────────────────
+        # motor -> current text shown in the Error column (col 4)
+        self._motor_error_text: dict[str, str] = {"FL": "", "FR": "", "RL": "", "RR": ""}
+        # uart -> decoded error parts accumulated within one report cycle
+        self._uart_report_decoded: dict[str, list[str]] = {}
 
         # ── Build UI ───────────────────────────────────────────────────────
         central = QWidget()
@@ -252,8 +330,17 @@ class EarendilControlGui(QMainWindow):
         top_row.addWidget(self._build_rover_status_group(), 1)
 
         left_layout.addLayout(top_row)
-        left_layout.addWidget(self._build_mode_value_group())
+
+        # ── Mode / Value  (left)  +  Operating Mode (right)  in one row ──
+        mode_op_row = QHBoxLayout()
+        mode_op_row.setContentsMargins(0, 0, 0, 0)
+        mode_op_row.setSpacing(8)
+        mode_op_row.addWidget(self._build_mode_value_group(), 1)
+        mode_op_row.addWidget(self._build_operating_mode_group())
+        left_layout.addLayout(mode_op_row)
+
         left_layout.addWidget(self._build_motor_table_group())
+        left_layout.addWidget(self._build_imu_group())
         left_layout.addStretch()
 
         splitter.addWidget(left_panel)
@@ -349,6 +436,7 @@ class EarendilControlGui(QMainWindow):
 
     def _build_mode_value_group(self) -> QGroupBox:
         grp = QGroupBox("Mode / Value")
+        grp.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         lay = QHBoxLayout(grp)
 
         lay.addWidget(QLabel("Mode:"))
@@ -391,30 +479,95 @@ class EarendilControlGui(QMainWindow):
 
         return grp
 
-    _DIR_STYLE_ACTIVE = (
-        "color: #FFD66B; font-size: 13px; font-weight: bold; "
-        "background-color: #0B0B0D; border: 1px solid #D4AF37; "
-        "border-radius: 4px; padding: 2px 8px;"
-    )
-    _DIR_STYLE_IDLE = (
-        "color: #5F5A4A; font-size: 13px; font-weight: bold; "
-        "background-color: #0B0B0D; border: 1px solid #3A3A3A; "
-        "border-radius: 4px; padding: 2px 8px;"
-    )
+    # ── LED helper ────────────────────────────────────────────────────────
+    @staticmethod
+    def _make_led() -> QFrame:
+        """Small circular LED widget (inactive/dim by default)."""
+        led = QFrame()
+        led.setFixedSize(18, 18)
+        led.setStyleSheet(
+            "QFrame { background-color: #2A2A31; border: 1px solid #3A3A3A; "
+            "border-radius: 9px; }"
+        )
+        return led
+
+    @staticmethod
+    def _style_led(led: QFrame, color: str | None):
+        """Apply active (`color`) or inactive (None) styling to an LED."""
+        if color is None:
+            led.setStyleSheet(
+                "QFrame { background-color: #2A2A31; border: 1px solid #3A3A3A; "
+                "border-radius: 9px; }"
+            )
+        else:
+            led.setStyleSheet(
+                f"QFrame {{ background-color: {color}; border: 1px solid {color}; "
+                f"border-radius: 9px; }}"
+            )
+
+    def _build_operating_mode_group(self) -> QGroupBox:
+        grp = QGroupBox("Operating Mode")
+        grp.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
+        grp.setMaximumWidth(420)
+        lay = QHBoxLayout(grp)
+        lay.setContentsMargins(8, 6, 8, 6)
+        lay.setSpacing(8)
+
+        # ── Left: three LEDs (red / yellow / green) ──────────────────────
+        leds_col = QVBoxLayout()
+        leds_col.setContentsMargins(0, 0, 0, 0)
+        leds_col.setSpacing(5)
+        self._led_red = self._make_led()
+        self._led_yellow = self._make_led()
+        self._led_green = self._make_led()
+        leds_col.addWidget(self._led_red)
+        leds_col.addWidget(self._led_yellow)
+        leds_col.addWidget(self._led_green)
+        leds_col.addStretch()
+        lay.addLayout(leds_col)
+
+        # ── Right: status box on top, three buttons below ────────────────
+        right_col = QVBoxLayout()
+        right_col.setContentsMargins(0, 0, 0, 0)
+        right_col.setSpacing(5)
+
+        self._lbl_op_mode_status = QLabel("DISARM")
+        self._lbl_op_mode_status.setAlignment(Qt.AlignCenter)
+        self._lbl_op_mode_status.setFixedHeight(34)
+        self._lbl_op_mode_status.setFixedWidth(380)
+        self._lbl_op_mode_status.setStyleSheet(
+            "QLabel { background-color: #B00020; color: #FFFFFF; "
+            "font-size: 16px; font-weight: bold; "
+            "border: 1px solid #5F5A4A; border-radius: 6px; }"
+        )
+        right_col.addWidget(self._lbl_op_mode_status)
+
+        btn_row = QHBoxLayout()
+        btn_row.setContentsMargins(0, 0, 0, 0)
+        btn_row.setSpacing(5)
+
+        btn_disarm = QPushButton("DISARM")
+        btn_disarm.clicked.connect(lambda: self._set_operating_mode("disarm"))
+        btn_row.addWidget(btn_disarm, 1)
+
+        btn_manual = QPushButton("MANUAL")
+        btn_manual.clicked.connect(lambda: self._set_operating_mode("manual"))
+        btn_row.addWidget(btn_manual, 1)
+
+        btn_auto = QPushButton("AUTONOMOUS")
+        btn_auto.clicked.connect(lambda: self._set_operating_mode("auto"))
+        btn_row.addWidget(btn_auto, 1)
+
+        right_col.addLayout(btn_row)
+        lay.addLayout(right_col, 1)
+
+        # Initialize indicators to the default operating mode.
+        self._update_operating_mode_ui(self._operating_mode)
+        return grp
 
     def _build_motor_table_group(self) -> QGroupBox:
         grp = QGroupBox("Motor State")
         lay = QVBoxLayout(grp)
-
-        # ── Compact motion indicator (top-left inside Motor State) ────
-        motion_row = QHBoxLayout()
-        self._lbl_direction = QLabel("IDLE")
-        self._lbl_direction.setAlignment(Qt.AlignCenter)
-        self._lbl_direction.setFixedWidth(110)
-        self._lbl_direction.setStyleSheet(self._DIR_STYLE_IDLE)
-        motion_row.addWidget(self._lbl_direction)
-        motion_row.addStretch()
-        lay.addLayout(motion_row)
 
         self._motor_table = QTableWidget(4, 7)
         self._motor_table.setHorizontalHeaderLabels(
@@ -432,18 +585,67 @@ class EarendilControlGui(QMainWindow):
 
         self._motor_table.setVerticalHeaderLabels([])
         self._motor_table.setEditTriggers(QTableWidget.NoEditTriggers)
+        self._motor_table.setFocusPolicy(Qt.NoFocus)
         self._motor_table.setMaximumHeight(160)
         lay.addWidget(self._motor_table)
         return grp
 
+    # ── 9-axis IMU placeholder ────────────────────────────────────────────
+    #   3 accel (X/Y/Z) + 3 gyro (X/Y/Z) + 3 mag (X/Y/Z).
+    #   Values shown as "--" until firmware sends real IMU data; the parser
+    #   hook (_update_imu_values) is wired but a no-op until then.
+    IMU_FIELDS = ("AX", "AY", "AZ", "GX", "GY", "GZ", "MX", "MY", "MZ")
+
+    def _build_imu_group(self) -> QGroupBox:
+        grp = QGroupBox("IMU (9-axis)")
+        grp.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        lay = QVBoxLayout(grp)
+        lay.setContentsMargins(8, 6, 8, 6)
+        lay.setSpacing(6)
+
+        self._imu_table = QTableWidget(3, 4)
+        self._imu_table.setHorizontalHeaderLabels(
+            ["Sensor", "X", "Y", "Z"]
+        )
+        headers = self._imu_table.horizontalHeader()
+        if headers:
+            headers.setSectionResizeMode(QHeaderView.Stretch)
+        self._imu_table.setVerticalHeaderLabels([])
+
+        sensors = [("Accel", "m/s²"), ("Gyro", "°/s"), ("Mag", "µT")]
+        for row, (name, _unit) in enumerate(sensors):
+            self._imu_table.setItem(row, 0, QTableWidgetItem(name))
+            for col in range(1, 4):
+                self._imu_table.setItem(row, col, QTableWidgetItem("--"))
+
+        self._imu_table.setEditTriggers(QTableWidget.NoEditTriggers)
+        self._imu_table.setFocusPolicy(Qt.NoFocus)
+        self._imu_table.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self._imu_table.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self._imu_table.setMaximumHeight(120)
+        lay.addWidget(self._imu_table)
+        return grp
+
+    def _update_imu_values(self, values: dict[str, float]):
+        """Update the IMU table from a 9-axis reading.
+
+        `values` keys: AX, AY, AZ, GX, GY, GZ, MX, MY, MZ.
+        Kept as a hook for future firmware IMU parsing; currently unused.
+        """
+        rows = {"A": 0, "G": 1, "M": 2}
+        for field in self.IMU_FIELDS:
+            if field not in values:
+                continue
+            row = rows[field[0]]
+            col = {"X": 1, "Y": 2, "Z": 3}[field[1]]
+            item = self._imu_table.item(row, col)
+            if item is not None:
+                item.setText(f"{values[field]:.2f}")
+
     def _update_motion_indicator(self, direction: str | None):
-        """Update the Motion box.  direction is one of W/S/A/D or None for IDLE."""
+        """Update the Motion badge in Rover Status.  direction is one of W/S/A/D or None for IDLE."""
         mapping = {"W": "FORWARD", "S": "BACKWARD", "A": "LEFT", "D": "RIGHT"}
         text = mapping.get(direction, "IDLE")
-        self._lbl_direction.setText(text)
-        self._lbl_direction.setStyleSheet(
-            self._DIR_STYLE_ACTIVE if text != "IDLE" else self._DIR_STYLE_IDLE
-        )
         color = "#FFD66B" if text != "IDLE" else "#5F5A4A"
         self._lbl_qs_motion.setText(f"Motion: {text}")
         self._lbl_qs_motion.setStyleSheet(
@@ -693,6 +895,7 @@ class EarendilControlGui(QMainWindow):
     def _on_rx_line(self, line: str):
         self._log_rx(line)
         self._parse_rx_for_motor_state(line)
+        self._parse_uart_error_line(line)
 
     def _parse_rx_for_motor_state(self, line: str):
         """Minimal parsing: update Link column if link-lost/recovered detected."""
@@ -709,6 +912,72 @@ class EarendilControlGui(QMainWindow):
                 if item:
                     item.setText("OK")
                     item.setForeground(QColor("#D4AF37"))
+
+    # ── UART error / recovery parsing ───────────────────────────────────────
+    #
+    # The H7 firmware (motor_uart_dma.c) reports UART errors over the
+    # terminal link (USART3) as plain log lines.  These are NOT motor
+    # protocol frames (ACK/STATUS/FAULT), so the existing table parser
+    # ignored them and only the console showed them.  These methods detect
+    # those log lines and route them into the motor table's Error column
+    # using the firmware's UART→motor mapping.
+
+    def _set_motor_error(self, motor: str, text: str, is_error: bool):
+        """Write `text` into the Error column (col 4) of the motor row."""
+        row = self.MOTOR_ROW.get(motor)
+        if row is None:
+            return
+        self._motor_error_text[motor] = text
+        item = self._motor_table.item(row, 4)
+        if item is not None:
+            item.setText(text)
+            item.setForeground(QColor("#B00020") if is_error else QColor("#D4AF37"))
+
+    def _parse_uart_error_line(self, line: str) -> bool:
+        """Detect H7 UART error/recovery log lines and update the motor table.
+
+        Returns True when the line was recognized as a UART error/recovery
+        line (regardless of whether a matching motor row was found).
+        """
+        # Raw error-code report (first occurrence or 5 s "still unresolved"
+        # repeat).  Decoded bit lines normally follow immediately; until then
+        # show the raw code so the table still reflects the error.
+        m = _RE_UART_ERROR_CODE.match(line)
+        if m:
+            uart, code = m.group(1), m.group(2)
+            motor = self.UART_TO_MOTOR.get(uart)
+            if motor is not None:
+                self._uart_report_decoded[uart] = []
+                self._set_motor_error(motor, f"UART error code: {code}", is_error=True)
+            return True
+
+        # Decoded error: "<CODE> - <Description>" (e.g. "FE - Framing error").
+        # Accumulate multiple bits within one report cycle and prefer this
+        # richer text over the raw code above.
+        m = _RE_UART_ERROR_DECODED.match(line)
+        if m:
+            uart, desc = m.group(1), m.group(2).strip()
+            motor = self.UART_TO_MOTOR.get(uart)
+            if motor is not None:
+                code = desc.split(" - ", 1)[0].strip().upper()
+                if code in self.UART_ERROR_CODES:
+                    buf = self._uart_report_decoded.setdefault(uart, [])
+                    if desc not in buf:
+                        buf.append(desc)
+                    self._set_motor_error(motor, ", ".join(buf), is_error=True)
+            return True
+
+        # RX recovered after a previous UART error → clear the Error column.
+        m = _RE_UART_RECOVERED.match(line)
+        if m:
+            uart = m.group(1)
+            motor = self.UART_TO_MOTOR.get(uart)
+            if motor is not None:
+                self._uart_report_decoded.pop(uart, None)
+                self._set_motor_error(motor, "OK", is_error=False)
+            return True
+
+        return False
 
     # ══════════════════════════════════════════════════════════════════════
     #  Serial Send
@@ -745,6 +1014,44 @@ class EarendilControlGui(QMainWindow):
     def _get_current_value(self) -> int:
         return self.current_rpm if self.mode == "RPM" else self.current_pwm
 
+    # ── Operating mode (DISARM / MANUAL / AUTONOMOUS) ─────────────────────
+    #   Distinct from the RPM/PWM drive mode below.  Commands go through the
+    #   same _send_cmd path used by all other H7 terminal commands so that
+    #   history/logging/disconnected handling stay consistent.
+    def _set_operating_mode(self, mode_key: str):
+        """Send the operating-mode command to H7 and update the local UI."""
+        cfg = self.OPERATING_MODES.get(mode_key)
+        if cfg is None:
+            return
+        self._send_cmd(cfg["command"])
+        self._update_operating_mode_ui(mode_key)
+        self._log_info(f"Operating mode: {cfg['label']}")
+
+    def _update_operating_mode_ui(self, mode_key: str):
+        """Refresh the three LEDs and the status box for `mode_key`."""
+        cfg = self.OPERATING_MODES.get(mode_key)
+        if cfg is None:
+            return
+        self._operating_mode = mode_key
+
+        # LEDs: only the active one is lit, the rest go dim.
+        for key in self.OPERATING_MODE_LED_KEYS:
+            led_cfg = self.OPERATING_MODES[key]
+            led = {
+                "disarm": self._led_red,
+                "manual": self._led_yellow,
+                "auto":   self._led_green,
+            }[key]
+            self._style_led(led, led_cfg["led"] if key == mode_key else None)
+
+        # Status box: background + text change with the operating mode.
+        self._lbl_op_mode_status.setText(cfg["label"])
+        self._lbl_op_mode_status.setStyleSheet(
+            f"QLabel {{ background-color: {cfg['status_bg']}; color: {cfg['status_fg']}; "
+            f"font-size: 18px; font-weight: bold; "
+            f"border: 1px solid #5F5A4A; border-radius: 6px; }}"
+        )
+
     def _set_mode(self, new_mode: str):
         if new_mode == self.mode:
             return
@@ -756,14 +1063,14 @@ class EarendilControlGui(QMainWindow):
             )
             self._lbl_value_label.setText("RPM Value:")
             self._lbl_value.setText(str(self.current_rpm))
-            self._send_cmd("mode rpm")
+            self._send_cmd("m rpm")
         else:
             self._lbl_mode.setStyleSheet(
                 "color: #FFD66B; font-size: 16px; font-weight: bold;"
             )
             self._lbl_value_label.setText("PWM Value:")
             self._lbl_value.setText(str(self.current_pwm))
-            self._send_cmd("mode pwm")
+            self._send_cmd("m pwm")
         self._log_info(f"Mode changed to {new_mode}")
         self._lbl_qs_mode.setText(f"Mode: {new_mode}")
 
