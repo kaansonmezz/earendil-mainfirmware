@@ -1,0 +1,4 @@
+../Core/Src/activity_light.c:21:6:ActivityLight_Init	8	static
+../Core/Src/activity_light.c:27:6:ActivityLight_SetMode	16	static
+../Core/Src/activity_light.c:54:13:ActivityLight_GetMode	4	static
+../Core/Src/activity_light.c:58:13:ActivityLight_ToString	16	static

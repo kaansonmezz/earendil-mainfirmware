@@ -272,8 +272,9 @@ class EarendilControlGui(QMainWindow):
         for btn in self.findChildren(QPushButton):
             btn.setFocusPolicy(Qt.NoFocus)
 
-        # Install global event filter to catch Space before any widget eats it
-        QApplication.instance().installEventFilter(self)
+        # H7 input handles its own keyboard events; main window handles the rest
+        self._h7_input.installEventFilter(self)
+        self.setFocusPolicy(Qt.StrongFocus)
 
         self._log_info("Ready. Connect to rover to begin.")
 
@@ -730,7 +731,12 @@ class EarendilControlGui(QMainWindow):
         if not text:
             return
         self._h7_input.clear()
-        self._send_cmd(text)
+        if not self.connected:
+            self._log_h7("[TX-H7]", f"{text}  (not sent - not connected)", "#C9831A")
+            self._log_warn("Cannot send to H7: serial port is not connected.")
+        else:
+            self._send_cmd(text)
+        self.setFocus()  # return focus to main window so WASD works again
 
     # ══════════════════════════════════════════════════════════════════════
     #  Mode / Value Management
@@ -791,28 +797,12 @@ class EarendilControlGui(QMainWindow):
     # ══════════════════════════════════════════════════════════════════════
 
     def eventFilter(self, obj, event):
-        """Global event filter: catch Space, consume auto-repeat, forward other keys."""
-        if event.type() == QEvent.KeyPress:
-            if isinstance(obj, QLineEdit):
-                if obj is self._h7_input and event.key() in (Qt.Key_Return, Qt.Key_Enter):
-                    self._send_h7_input()
-                    return True
-                return False
-            if event.isAutoRepeat():
-                return True  # consume OS auto-repeat, our timer handles repeating
-            if event.key() == Qt.Key_Space:
-                self._send_cmd("stop")
-                self._update_motion_indicator(None)
+        """Event filter only for H7 input field."""
+        if obj is self._h7_input:
+            if event.type() == QEvent.KeyPress and event.key() == Qt.Key_Escape:
+                self.setFocus()
                 return True
-            self.keyPressEvent(event)
-            return True
-        if event.type() == QEvent.KeyRelease:
-            if isinstance(obj, QLineEdit):
-                return False
-            if event.isAutoRepeat():
-                return True  # consume auto-repeat release
-            self.keyReleaseEvent(event)
-            return True
+            return False  # let QLineEdit handle its own events
         return super().eventFilter(obj, event)
 
     MOVEMENT_KEYS = ("W", "S", "A", "D")
@@ -875,6 +865,8 @@ class EarendilControlGui(QMainWindow):
                 self._repeat_timer.start()
 
     def keyReleaseEvent(self, event: QKeyEvent):
+        if event.isAutoRepeat():
+            return
         key_id = self._key_to_id(event)
         if not key_id or key_id not in self._keys_held:
             super().keyReleaseEvent(event)

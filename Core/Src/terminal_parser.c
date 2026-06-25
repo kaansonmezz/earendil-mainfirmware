@@ -1,4 +1,5 @@
 #include "terminal_parser.h"
+#include "activity_light.h"
 #include <string.h>
 #include <stdlib.h>
 #include <ctype.h>
@@ -107,15 +108,15 @@ bool TerminalParser_Parse(const char *line, TerminalCommand_t *outResult)
         return true;
     }
 
-    /* ── 6. mode rpm ─────────────────────────────────────────────────── */
-    if (strcmp(buf, "mode rpm") == 0)
+    /* ── 6. m rpm (control mode) ─────────────────────────────────────── */
+    if (strcmp(buf, "m rpm") == 0)
     {
         outResult->type = TCMD_MODE_RPM;
         return true;
     }
 
-    /* ── 7. mode pwm ─────────────────────────────────────────────────── */
-    if (strcmp(buf, "mode pwm") == 0)
+    /* ── 7. m pwm (control mode) ─────────────────────────────────────── */
+    if (strcmp(buf, "m pwm") == 0)
     {
         outResult->type = TCMD_MODE_PWM;
         return true;
@@ -128,7 +129,35 @@ bool TerminalParser_Parse(const char *line, TerminalCommand_t *outResult)
         return true;
     }
 
-    /* ── 9. fd / bd / rd / ld (duty, value 0..255) ──────────────────── */
+    /* ── 9. drive mode────────────────────────────────────────────────── */
+    if (strcmp(buf, "mode disarm") == 0)
+    {
+        ActivityLight_SetMode(ROVER_MODE_DISARM);
+        outResult->type = TCMD_STOP;
+        outResult->motion.direction = DIR_STOP;
+        outResult->motion.speed = 0;
+        return true;
+    }
+
+    if (strcmp(buf, "mode manual") == 0)
+    {
+        ActivityLight_SetMode(ROVER_MODE_MANUAL);
+        outResult->type = TCMD_STOP;
+        outResult->motion.direction = DIR_STOP;
+        outResult->motion.speed = 0;
+        return true;
+    }
+
+    if (strcmp(buf, "mode auto") == 0)
+    {
+        ActivityLight_SetMode(ROVER_MODE_AUTONOMOUS);
+        outResult->type = TCMD_STOP;
+        outResult->motion.direction = DIR_STOP;
+        outResult->motion.speed = 0;
+        return true;
+    }
+
+    /* ── 10. fd / bd / rd / ld (duty, value 0..255) ──────────────────── */
     if (len >= 3 && buf[1] == 'd' &&
         (buf[0] == 'f' || buf[0] == 'b' || buf[0] == 'r' || buf[0] == 'l'))
     {
@@ -152,7 +181,7 @@ bool TerminalParser_Parse(const char *line, TerminalCommand_t *outResult)
         return true;
     }
 
-    /* ── 10. f / b / r / l (RPM, value 0..200) ──────────────────────── */
+    /* ── 11. f / b / r / l (RPM, value 0..200) ──────────────────────── */
     if (len >= 2)
     {
         char dir = buf[0];

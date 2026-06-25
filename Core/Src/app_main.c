@@ -5,6 +5,7 @@
 #include "terminal_parser.h"
 #include "command_handler.h"
 #include "control_mode.h"
+#include "activity_light.h"
 #include "motion_controller.h"
 #include "motor_dispatcher.h"
 #include "ack_manager.h"
@@ -23,6 +24,7 @@ void App_Init(void)
     TerminalIf_Init();
 
     ControlMode_Init();
+    ActivityLight_Init();
 
     MotionController_Init();
     MotorDispatcher_Init();

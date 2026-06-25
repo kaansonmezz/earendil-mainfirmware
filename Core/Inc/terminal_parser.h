@@ -12,9 +12,9 @@ typedef enum
     TCMD_BRAKE,         /* brake -> send x to all motors */
     TCMD_IDENTIFY,      /* identify */
     TCMD_STATUS,        /* status */
-    TCMD_MODE_RPM,      /* mode rpm */
-    TCMD_MODE_PWM,      /* mode pwm */
-    TCMD_MODE_QUERY,    /* mode (print current) */
+    TCMD_MODE_RPM,      /* m rpm */
+    TCMD_MODE_PWM,      /* m pwm */
+    TCMD_MODE_QUERY,    /* mode (print current rover mode) */
     TCMD_MOTION         /* f/b/r/l/fd/bd/rd/ld + value */
 } TerminalCommandType_t;
 

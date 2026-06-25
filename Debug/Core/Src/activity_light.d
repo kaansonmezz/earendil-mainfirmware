@@ -1,5 +1,4 @@
-Core/Src/terminal_parser.o: ../Core/Src/terminal_parser.c \
- ../Core/Inc/terminal_parser.h ../Core/Inc/rover_types.h \
+Core/Src/activity_light.o: ../Core/Src/activity_light.c \
  ../Core/Inc/activity_light.h \
  ../Drivers/STM32H7xx_HAL_Driver/Inc/stm32h7xx_hal.h \
  ../Core/Inc/stm32h7xx_hal_conf.h \
@@ -32,8 +31,6 @@ Core/Src/terminal_parser.o: ../Core/Src/terminal_parser.c \
  ../Drivers/STM32H7xx_HAL_Driver/Inc/stm32h7xx_hal_pwr_ex.h \
  ../Drivers/STM32H7xx_HAL_Driver/Inc/stm32h7xx_hal_uart.h \
  ../Drivers/STM32H7xx_HAL_Driver/Inc/stm32h7xx_hal_uart_ex.h
-../Core/Inc/terminal_parser.h:
-../Core/Inc/rover_types.h:
 ../Core/Inc/activity_light.h:
 ../Drivers/STM32H7xx_HAL_Driver/Inc/stm32h7xx_hal.h:
 ../Core/Inc/stm32h7xx_hal_conf.h:

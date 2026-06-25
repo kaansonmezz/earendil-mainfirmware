@@ -34,7 +34,7 @@ Core/Src/command_handler.o: ../Core/Src/command_handler.c \
  ../Drivers/STM32H7xx_HAL_Driver/Inc/stm32h7xx_hal_pwr_ex.h \
  ../Drivers/STM32H7xx_HAL_Driver/Inc/stm32h7xx_hal_uart.h \
  ../Drivers/STM32H7xx_HAL_Driver/Inc/stm32h7xx_hal_uart_ex.h \
- ../Core/Inc/logger.h
+ ../Core/Inc/activity_light.h ../Core/Inc/logger.h
 ../Core/Inc/command_handler.h:
 ../Core/Inc/terminal_parser.h:
 ../Core/Inc/rover_types.h:
@@ -74,4 +74,5 @@ Core/Src/command_handler.o: ../Core/Src/command_handler.c \
 ../Drivers/STM32H7xx_HAL_Driver/Inc/stm32h7xx_hal_pwr_ex.h:
 ../Drivers/STM32H7xx_HAL_Driver/Inc/stm32h7xx_hal_uart.h:
 ../Drivers/STM32H7xx_HAL_Driver/Inc/stm32h7xx_hal_uart_ex.h:
+../Core/Inc/activity_light.h:
 ../Core/Inc/logger.h:

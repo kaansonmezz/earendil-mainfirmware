@@ -2,6 +2,7 @@
 #include "control_mode.h"
 #include "motion_controller.h"
 #include "motor_dispatcher.h"
+#include "activity_light.h"
 #include "logger.h"
 
 /* ── Helpers ──────────────────────────────────────────────────────────────── */
@@ -25,10 +26,15 @@ void CommandHandler_PrintHelp(void)
 {
     Logger_Log(LOG_INFO, "Available commands:");
     Logger_Log(LOG_INFO, "");
-    Logger_Log(LOG_INFO, "Modes:");
-    Logger_Log(LOG_INFO, "  mode             Show current mode");
-    Logger_Log(LOG_INFO, "  mode rpm         Set RPM mode and forward \"mode rpm\"");
-    Logger_Log(LOG_INFO, "  mode pwm         Set PWM mode and forward \"mode pwm\"");
+    Logger_Log(LOG_INFO, "Control mode:");
+    Logger_Log(LOG_INFO, "  m rpm            Set RPM mode and forward \"mode rpm\"");
+    Logger_Log(LOG_INFO, "  m pwm            Set PWM mode and forward \"mode pwm\"");
+    Logger_Log(LOG_INFO, "");
+    Logger_Log(LOG_INFO, "Rover mode (LED):");
+    Logger_Log(LOG_INFO, "  mode             Show current rover mode (disarm/manual/auto)");
+    Logger_Log(LOG_INFO, "  mode disarm      Disarm rover (red LED, stop motors)");
+    Logger_Log(LOG_INFO, "  mode manual      Manual mode (green LED, stop motors)");
+    Logger_Log(LOG_INFO, "  mode auto        Autonomous mode (yellow LED, stop motors)");
     Logger_Log(LOG_INFO, "");
     Logger_Log(LOG_INFO, "RPM mode commands:");
     Logger_Log(LOG_INFO, "  f0..f200         Forward RPM command");
@@ -110,8 +116,8 @@ void CommandHandler_Handle(const TerminalCommand_t *cmd)
             break;
 
         case TCMD_MODE_QUERY:
-            Logger_Log(LOG_INFO, "Current mode: %s",
-                       ControlMode_ToString(ControlMode_Get()));
+            Logger_Log(LOG_INFO, "Rover mode: %s",
+                       ActivityLight_ToString(ActivityLight_GetMode()));
             break;
 
         case TCMD_IDENTIFY:

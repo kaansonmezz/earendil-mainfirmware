@@ -7,5 +7,5 @@
 ../Core/Src/main.c:389:13:MX_USART3_UART_Init	5
 ../Core/Src/main.c:435:13:MX_DMA_Init	1
 ../Core/Src/main.c:474:13:MX_GPIO_Init	1
-../Core/Src/main.c:497:6:MPU_Config	1
-../Core/Src/main.c:528:6:Error_Handler	1
+../Core/Src/main.c:509:6:MPU_Config	1
+../Core/Src/main.c:540:6:Error_Handler	1
