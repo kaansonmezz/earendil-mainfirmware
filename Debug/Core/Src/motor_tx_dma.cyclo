@@ -9,4 +9,5 @@
 ../Core/Src/motor_tx_dma.c:206:6:MotorTxDma_OnTxError	2
 ../Core/Src/motor_tx_dma.c:221:6:MotorTxDma_IsBusy	2
 ../Core/Src/motor_tx_dma.c:228:6:MotorTxDma_HasPending	2
-../Core/Src/motor_tx_dma.c:239:6:HAL_UART_TxCpltCallback	1
+../Core/Src/motor_tx_dma.c:235:6:MotorTxDma_CancelPending	2
+../Core/Src/motor_tx_dma.c:254:6:HAL_UART_TxCpltCallback	1

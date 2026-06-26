@@ -22,5 +22,6 @@ void MotorTxDma_OnTxError(UART_HandleTypeDef *huart);
 
 bool MotorTxDma_IsBusy(MotorId_t motor);
 bool MotorTxDma_HasPending(MotorId_t motor);
+void MotorTxDma_CancelPending(void);  /* drop all queued (non-active) TX frames */
 
 #endif /* MOTOR_TX_DMA_H */

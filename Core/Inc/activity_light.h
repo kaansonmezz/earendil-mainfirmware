@@ -8,14 +8,10 @@
 #ifndef INC_ACTIVITY_LIGHT_H_
 #define INC_ACTIVITY_LIGHT_H_
 
-#include "stm32h7xx_hal.h" // STM32H7 HAL Kütüphanesi
+#include "stm32h7xx_hal.h" /* STM32H7 HAL Library */
+#include "rover_types.h"   /* RoverMode_t (canonical home) */
 
-// Rover çalışma modlarını tanımlayan Enum
-typedef enum {
-    ROVER_MODE_DISARM = 0, // Kırmızı Işık
-    ROVER_MODE_MANUAL,     // Yeşil Işık
-    ROVER_MODE_AUTONOMOUS  // Sarı Işık
-} RoverMode_t;
+/* Rover operating modes are declared in rover_types.h (RoverMode_t). */
 
 // Dışarıdan çağırılacak fonksiyonlar
 void ActivityLight_Init(void);

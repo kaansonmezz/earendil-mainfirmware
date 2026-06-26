@@ -34,11 +34,12 @@ Core/Src/app_main.o: ../Core/Src/app_main.c ../Core/Inc/app_main.h \
  ../Core/Inc/rover_types.h ../Core/Inc/logger.h ../Core/Inc/terminal_if.h \
  ../Core/Inc/terminal_parser.h ../Core/Inc/command_handler.h \
  ../Core/Inc/terminal_parser.h ../Core/Inc/control_mode.h \
- ../Core/Inc/activity_light.h ../Core/Inc/motion_controller.h \
- ../Core/Inc/motor_dispatcher.h ../Core/Inc/motor_link.h \
- ../Core/Inc/app_config.h ../Core/Inc/ack_manager.h \
- ../Core/Inc/safety_manager.h ../Core/Inc/motor_uart_dma.h \
- ../Core/Inc/motor_tx_dma.h ../Core/Inc/main.h
+ ../Core/Inc/activity_light.h ../Core/Inc/operating_mode.h \
+ ../Core/Inc/motion_controller.h ../Core/Inc/motor_dispatcher.h \
+ ../Core/Inc/motor_link.h ../Core/Inc/app_config.h \
+ ../Core/Inc/ack_manager.h ../Core/Inc/safety_manager.h \
+ ../Core/Inc/motor_uart_dma.h ../Core/Inc/motor_tx_dma.h \
+ ../Core/Inc/main.h
 ../Core/Inc/app_main.h:
 ../Core/Inc/app_config.h:
 ../Drivers/STM32H7xx_HAL_Driver/Inc/stm32h7xx_hal.h:
@@ -80,6 +81,7 @@ Core/Src/app_main.o: ../Core/Src/app_main.c ../Core/Inc/app_main.h \
 ../Core/Inc/terminal_parser.h:
 ../Core/Inc/control_mode.h:
 ../Core/Inc/activity_light.h:
+../Core/Inc/operating_mode.h:
 ../Core/Inc/motion_controller.h:
 ../Core/Inc/motor_dispatcher.h:
 ../Core/Inc/motor_link.h:

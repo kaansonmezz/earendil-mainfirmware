@@ -232,6 +232,21 @@ bool MotorTxDma_HasPending(MotorId_t motor)
     return s_channels[motor].pending;
 }
 
+void MotorTxDma_CancelPending(void)
+{
+    /* Drop every queued (not-yet-started) TX frame on all motor channels.
+     * Active DMA transfers are left alone (they will complete and raise
+     * TxCplt).  This guarantees a motion frame staged before DISARM cannot
+     * fire after the lock is released — defense against stale commands. */
+    for (int i = 0; i < MOTOR_TX_DMA_COUNT; i++)
+    {
+        MotorTxDmaChannel_t *ch = &s_channels[i];
+        ch->pending       = false;
+        ch->pendingLen    = 0;
+        ch->pendingSafety = false;
+    }
+}
+
 /* ── HAL UART TX complete callback router ────────────────────────────────────
  * Single project-wide override of the HAL weak symbol. Routes to the TX DMA
  * state owner. Kept short: no logging, no blocking, no HAL_Delay().

@@ -1,5 +1,7 @@
-../Core/Src/safety_manager.c:14:20:GetMotorName	16	static
-../Core/Src/safety_manager.c:28:6:SafetyManager_Init	16	static
-../Core/Src/safety_manager.c:38:6:SafetyManager_Update	24	static
-../Core/Src/safety_manager.c:72:6:SafetyManager_NotifyRx	24	static
-../Core/Src/safety_manager.c:86:6:SafetyManager_IsLinkLost	16	static
+../Core/Src/safety_manager.c:17:20:GetMotorName	16	static
+../Core/Src/safety_manager.c:31:6:SafetyManager_Init	16	static
+../Core/Src/safety_manager.c:41:6:SafetyManager_Update	24	static
+../Core/Src/safety_manager.c:75:6:SafetyManager_NotifyRx	24	static
+../Core/Src/safety_manager.c:89:6:SafetyManager_IsLinkLost	16	static
+../Core/Src/safety_manager.c:98:6:SafetyManager_EnterDisarm	8	static
+../Core/Src/safety_manager.c:119:6:SafetyManager_LeaveDisarm	8	static

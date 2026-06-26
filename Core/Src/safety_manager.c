@@ -1,6 +1,9 @@
 #include "safety_manager.h"
 #include "app_config.h"
 #include "logger.h"
+#include "motion_controller.h"
+#include "motor_dispatcher.h"
+#include "motor_tx_dma.h"
 
 /* ── Private variables ──────────────────────────────────────────────────── */
 /* volatile: written from SafetyManager_NotifyRx() (RX callback/ISR context),
@@ -88,4 +91,36 @@ bool SafetyManager_IsLinkLost(MotorId_t id)
     if (id >= MOTOR_COUNT)
         return true;
     return linkLost[id];
+}
+
+/* ── DISARM safety lock helpers ──────────────────────────────────────────── */
+
+void SafetyManager_EnterDisarm(void)
+{
+    /* Hard brake sequence on DISARM: an abrupt stop to every motor.
+     *
+     *   1. Drop any motion frame that was staged before DISARM (so it
+     *      cannot sneak in between the brake and the stop).
+     *   2. Send a hard brake ("x") to all motor UARTs — abrupt stop.
+     *   3. Send a framed STOP/0 to all motor UARTs — hold at zero.  If a
+     *      channel is still busy transmitting "x", this STOP is staged as
+     *      pending and fires automatically on TX-complete (safety commands
+     *      always win the pending slot), so the order x-then-stop is preserved.
+     *   4. Zero the internal motion command table so nothing stale remains.
+     *
+     * The defense-in-depth gate in motor_dispatcher blocks any non-STOP
+     * frame while disarmed, so only these safety frames reach the UARTs. */
+    MotorTxDma_CancelPending();       /* drop staged stale motion first */
+    MotorDispatcher_SendRaw("x");     /* hard brake: abrupt stop to all motors */
+    MotionController_Stop();          /* framed STOP/0 to all motor UARTs */
+    MotionController_DisarmSafe();    /* zero the internal motion command table */
+}
+
+void SafetyManager_LeaveDisarm(void)
+{
+    /* Leaving DISARM must NOT inherit stale motion.  Keep motors stopped and
+     * clear any leftover state; a fresh valid motion command is required to
+     * move.  Nothing is sent on the UARTs here — motors are already stopped. */
+    MotorTxDma_CancelPending();
+    MotionController_DisarmSafe();
 }

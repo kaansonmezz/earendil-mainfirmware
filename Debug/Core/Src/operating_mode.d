@@ -1,8 +1,6 @@
-Core/Src/command_handler.o: ../Core/Src/command_handler.c \
- ../Core/Inc/command_handler.h ../Core/Inc/terminal_parser.h \
- ../Core/Inc/rover_types.h ../Core/Inc/control_mode.h \
- ../Core/Inc/motion_controller.h ../Core/Inc/motor_dispatcher.h \
- ../Core/Inc/motor_link.h ../Core/Inc/app_config.h \
+Core/Src/operating_mode.o: ../Core/Src/operating_mode.c \
+ ../Core/Inc/operating_mode.h ../Core/Inc/rover_types.h \
+ ../Core/Inc/activity_light.h \
  ../Drivers/STM32H7xx_HAL_Driver/Inc/stm32h7xx_hal.h \
  ../Core/Inc/stm32h7xx_hal_conf.h \
  ../Drivers/STM32H7xx_HAL_Driver/Inc/stm32h7xx_hal_rcc.h \
@@ -33,17 +31,10 @@ Core/Src/command_handler.o: ../Core/Src/command_handler.c \
  ../Drivers/STM32H7xx_HAL_Driver/Inc/stm32h7xx_hal_pwr.h \
  ../Drivers/STM32H7xx_HAL_Driver/Inc/stm32h7xx_hal_pwr_ex.h \
  ../Drivers/STM32H7xx_HAL_Driver/Inc/stm32h7xx_hal_uart.h \
- ../Drivers/STM32H7xx_HAL_Driver/Inc/stm32h7xx_hal_uart_ex.h \
- ../Core/Inc/activity_light.h ../Core/Inc/operating_mode.h \
- ../Core/Inc/safety_manager.h ../Core/Inc/logger.h
-../Core/Inc/command_handler.h:
-../Core/Inc/terminal_parser.h:
+ ../Drivers/STM32H7xx_HAL_Driver/Inc/stm32h7xx_hal_uart_ex.h
+../Core/Inc/operating_mode.h:
 ../Core/Inc/rover_types.h:
-../Core/Inc/control_mode.h:
-../Core/Inc/motion_controller.h:
-../Core/Inc/motor_dispatcher.h:
-../Core/Inc/motor_link.h:
-../Core/Inc/app_config.h:
+../Core/Inc/activity_light.h:
 ../Drivers/STM32H7xx_HAL_Driver/Inc/stm32h7xx_hal.h:
 ../Core/Inc/stm32h7xx_hal_conf.h:
 ../Drivers/STM32H7xx_HAL_Driver/Inc/stm32h7xx_hal_rcc.h:
@@ -75,7 +66,3 @@ Core/Src/command_handler.o: ../Core/Src/command_handler.c \
 ../Drivers/STM32H7xx_HAL_Driver/Inc/stm32h7xx_hal_pwr_ex.h:
 ../Drivers/STM32H7xx_HAL_Driver/Inc/stm32h7xx_hal_uart.h:
 ../Drivers/STM32H7xx_HAL_Driver/Inc/stm32h7xx_hal_uart_ex.h:
-../Core/Inc/activity_light.h:
-../Core/Inc/operating_mode.h:
-../Core/Inc/safety_manager.h:
-../Core/Inc/logger.h:

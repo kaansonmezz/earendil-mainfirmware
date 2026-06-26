@@ -12,9 +12,10 @@ typedef enum
     TCMD_BRAKE,         /* brake -> send x to all motors */
     TCMD_IDENTIFY,      /* identify */
     TCMD_STATUS,        /* status */
-    TCMD_MODE_RPM,      /* m rpm */
-    TCMD_MODE_PWM,      /* m pwm */
+    TCMD_MODE_RPM,      /* m speed */
+    TCMD_MODE_PWM,      /* m duty */
     TCMD_MODE_QUERY,    /* mode (print current rover mode) */
+    TCMD_OP_MODE,       /* mode disarm / mode manual / mode auto / mode autonomous */
     TCMD_MOTION         /* f/b/r/l/fd/bd/rd/ld + value */
 } TerminalCommandType_t;
 
@@ -23,6 +24,7 @@ typedef struct
 {
     TerminalCommandType_t type;
     MotionCmd_t   motion;        /* direction + clamped speed (TCMD_MOTION / TCMD_STOP) */
+    RoverMode_t   opMode;        /* target operating mode (TCMD_OP_MODE) */
     bool          isDuty;        /* true for fd/bd/rd/ld, false for f/b/r/l */
     uint16_t      value;         /* clamped numeric value */
     uint16_t      originalValue; /* raw numeric value before clamping */

@@ -1,3 +1,6 @@
-../Core/Src/command_handler.c:11:20:MotionPrefix	9
-../Core/Src/command_handler.c:25:6:CommandHandler_PrintHelp	1
-../Core/Src/command_handler.c:59:6:CommandHandler_Handle	16
+../Core/Src/command_handler.c:13:20:MotionPrefix	9
+../Core/Src/command_handler.c:28:6:Command_IsModeTransition	3
+../Core/Src/command_handler.c:33:6:Command_IsMotionCommand	3
+../Core/Src/command_handler.c:42:13:HandleOperatingMode	4
+../Core/Src/command_handler.c:68:6:CommandHandler_PrintHelp	1
+../Core/Src/command_handler.c:104:6:CommandHandler_Handle	21

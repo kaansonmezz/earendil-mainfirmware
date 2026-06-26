@@ -4,3 +4,4 @@
 ../Core/Src/motion_controller.c:26:6:MotionController_Init	1
 ../Core/Src/motion_controller.c:31:6:MotionController_Execute	6
 ../Core/Src/motion_controller.c:72:6:MotionController_Stop	1
+../Core/Src/motion_controller.c:79:6:MotionController_DisarmSafe	1

@@ -67,4 +67,14 @@ typedef enum
     LINK_TIMEOUT
 } LinkState_t;
 
+/* ── Rover operating mode (DISARM / MANUAL / AUTONOMOUS) ────────────────── */
+/*   Distinct from the RPM/PWM control mode.  Authority lives in
+ *   operating_mode.c; activity_light.c only drives the GPIO LEDs. */
+typedef enum
+{
+    ROVER_MODE_DISARM = 0,
+    ROVER_MODE_MANUAL,
+    ROVER_MODE_AUTONOMOUS
+} RoverMode_t;
+
 #endif /* ROVER_TYPES_H */

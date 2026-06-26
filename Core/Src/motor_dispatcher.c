@@ -1,9 +1,12 @@
 #include "motor_dispatcher.h"
 #include "motor_protocol.h"
+#include "control_mode.h"
 #include "app_config.h"
 #include "motor_tx_dma.h"
+#include "operating_mode.h"
 #include "logger.h"
 #include <string.h>
+#include <stdbool.h>
 #include <stdio.h>
 
 static MotorLink_t motorLinks[MOTOR_COUNT];
@@ -22,6 +25,15 @@ void MotorDispatcher_Send(MotorId_t id, const MotorCmd_t *cmd)
     if (id >= MOTOR_COUNT || cmd == NULL)
         return;
 
+    /* Defense-in-depth: while DISARM is active, only STOP/zero framed motor
+     * commands may reach the UARTs.  Any FORWARD/BACKWARD frame is dropped
+     * here even if a caller bypassed the command_handler gate. */
+    if (OperatingMode_IsDisarm() && cmd->dir != MCMD_STOP)
+    {
+        Logger_Log(LOG_WARN, "[DISARM] motor dispatch blocked (motor %d)", (int)id);
+        return;
+    }
+
     uint16_t frameLen = MotorProtocol_Encode(cmd, txBuf, sizeof(txBuf));
 
     if (frameLen == 0)
@@ -38,6 +50,7 @@ void MotorDispatcher_Send(MotorId_t id, const MotorCmd_t *cmd)
     }
 
     const char *names[] = {"FL", "FR", "RL", "RR"};
+    bool isRpm = (ControlMode_Get() == CONTROL_MODE_RPM);
 
     if (cmd->dir == MCMD_STOP)
     {
@@ -45,11 +58,17 @@ void MotorDispatcher_Send(MotorId_t id, const MotorCmd_t *cmd)
     }
     else if (cmd->dir == MCMD_FORWARD)
     {
-        Logger_Log(LOG_INFO, "[TX][%s] f%u", names[id], cmd->pwm);
+        if (isRpm)
+            Logger_Log(LOG_INFO, "[TX][%s] rpm %u", names[id], cmd->pwm);
+        else
+            Logger_Log(LOG_INFO, "[TX][%s] f%u", names[id], cmd->pwm);
     }
     else if (cmd->dir == MCMD_BACKWARD)
     {
-        Logger_Log(LOG_INFO, "[TX][%s] b%u", names[id], cmd->pwm);
+        if (isRpm)
+            Logger_Log(LOG_INFO, "[TX][%s] rpm -%u", names[id], cmd->pwm);
+        else
+            Logger_Log(LOG_INFO, "[TX][%s] b%u", names[id], cmd->pwm);
     }
 }
 

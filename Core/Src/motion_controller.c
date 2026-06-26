@@ -75,3 +75,11 @@ void MotionController_Stop(void)
     MotorDispatcher_SendAll(motorCmds);
     Logger_Log(LOG_INFO, "Motion: STOP");
 }
+
+void MotionController_DisarmSafe(void)
+{
+    /* Neutralize any stale motion state so a command queued before DISARM
+     * can never execute after leaving DISARM.  This zeroes the internal
+     * command table without relying on a fresh command arriving. */
+    SetAllMotors(MCMD_STOP, 0);
+}

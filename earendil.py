@@ -9,10 +9,11 @@ Controls:
     W/A/S/D   -> forward / left / backward / right
     Space     -> stop
     X         -> brake
-    M         -> toggle mode (RPM / PWM)
+    M         -> toggle mode (RPM / DUTY)
+
     I         -> identify
-    LShift    -> increase RPM/PWM by +5
-    LCtrl     -> decrease RPM/PWM by -5
+    LShift    -> increase RPM/DUTY by +5
+    LCtrl     -> decrease RPM/DUTY by -5
 
 Run:
     python earendil.py
@@ -34,7 +35,10 @@ try:
         QDialog, QHeaderView, QSplitter, QFrame, QSizePolicy,
     )
     from PySide6.QtCore import Qt, QTimer, Signal, QObject, QThread, QEvent
-    from PySide6.QtGui import QFont, QColor, QTextCursor, QKeyEvent, QKeySequence
+    from PySide6.QtGui import (
+        QFont, QColor, QTextCursor, QKeyEvent, QKeySequence,
+        QPainter, QPixmap, QImage,
+    )
 except ImportError:
     _missing.append("PySide6  (pip install PySide6)")
 
@@ -49,6 +53,79 @@ if _missing:
     for m in _missing:
         print(f"  - {m}")
     sys.exit(1)
+
+
+# ════════════════════════════════════════════════════════════════════════════
+#  Background Logo Watermark
+#  Paints a low-opacity centered logo behind the GUI content in paintEvent().
+# ════════════════════════════════════════════════════════════════════════════
+
+class LogoBackgroundWidget(QWidget):
+    """Central widget that paints a transparent logo watermark.
+
+    The logo is drawn in the bottom-left corner at low opacity; child widgets
+    (buttons, tables, consoles) paint on top via Qt's normal compositing, so
+    the logo always sits behind the UI content.
+    """
+
+    @staticmethod
+    def _trim_alpha(pixmap: QPixmap) -> QPixmap:
+        """Crop transparent margins so the visible artwork fills the pixmap.
+
+        Without this, a logo PNG with transparent padding makes bottom-left
+        corner positioning look wrong (the artwork sits in the middle of the
+        pixmap area, not at the corner).
+        """
+        if pixmap.isNull():
+            return pixmap
+        img = pixmap.toImage().convertToFormat(QImage.Format_ARGB32_Premultiplied)
+        w, h = img.width(), img.height()
+        min_x, min_y = w, h
+        max_x, max_y = -1, -1
+        for y in range(h):
+            for x in range(w):
+                if img.pixel(x, y) != 0:  # non-fully-transparent pixel
+                    if x < min_x: min_x = x
+                    if x > max_x: max_x = x
+                    if y < min_y: min_y = y
+                    if y > max_y: max_y = y
+        if max_x < 0:  # fully transparent image
+            return pixmap
+        return QPixmap.fromImage(img.copy(min_x, min_y,
+                                          max_x - min_x + 1,
+                                          max_y - min_y + 1))
+
+    def __init__(self, logo_path: str, opacity: float = 0.06, parent=None):
+        super().__init__(parent)
+        self.logo = self._trim_alpha(QPixmap(logo_path))
+        self.opacity = opacity
+        self._logo_missing = self.logo.isNull()
+        if self._logo_missing:
+            print(f"[GUI-WARN] Background logo could not be loaded: {logo_path}")
+
+    def paintEvent(self, event):
+        # Paint a solid dark base so the watermark always sits on the theme
+        # background, then draw the logo in the bottom-left corner at low
+        # opacity. Child widgets composite over this in Qt's normal paint order.
+        painter = QPainter(self)
+        painter.fillRect(self.rect(), QColor("#101014"))
+
+        if self.logo.isNull():
+            return
+
+        painter.setRenderHint(QPainter.SmoothPixmapTransform, True)
+        painter.setOpacity(self.opacity)
+
+        target_width = int(self.width() * 0.12)
+        if target_width <= 0:
+            return
+        scaled = self.logo.scaledToWidth(target_width, Qt.SmoothTransformation)
+
+        # Bottom-left corner, flush against the edges.
+        x = 0
+        y = self.height() - scaled.height()
+
+        painter.drawPixmap(x, y, scaled)
 
 
 # ════════════════════════════════════════════════════════════════════════════
@@ -117,6 +194,17 @@ _RE_UART_RECOVERED = re.compile(
     r"^\[INFO\]\s+(USART2|UART4|UART5|UART7)\s+RX recovered after UART error$"
 )
 
+# ── Operating mode confirmation from H7 firmware (command_handler.c) ──────
+#   The firmware logger (logger.c) prepends a level tag to every line, so
+#   the actual serial output looks like:
+#       [INFO] [MODE] DISARM active, motion commands locked
+#       [INFO] [MODE] MANUAL active
+#       [INFO] [MODE] AUTONOMOUS active
+# This is the single source of truth for the GUI Operating Mode indicator.
+_RE_OP_MODE_CONFIRM = re.compile(
+    r"\[MODE\]\s+(DISARM|MANUAL|AUTONOMOUS)\s+active\b"
+)
+
 
 # ════════════════════════════════════════════════════════════════════════════
 #  Main GUI
@@ -137,7 +225,16 @@ class EarendilControlGui(QMainWindow):
         color: #C0C0C0;
         font-size: 13px;
     }
+    /* Container widgets stay transparent so the centered background logo
+       (painted on the central widget) shows through the panel gaps. */
+    QSplitter {
+        background: transparent;
+    }
+    QWidget#sidePanel {
+        background: transparent;
+    }
     QGroupBox {
+        background-color: transparent;
         border: 1px solid #5F5A4A;
         border-radius: 6px;
         margin-top: 10px;
@@ -214,6 +311,9 @@ class EarendilControlGui(QMainWindow):
 
     # ── Constants ──────────────────────────────────────────────────────────
     REPEAT_INTERVAL_MS = 500
+    # How long the GUI waits for an H7 confirmation of an operating-mode
+    # command before warning that the mode change was not confirmed.
+    OP_MODE_CONFIRM_TIMEOUT_MS = 3000
     DEFAULT_RPM = 100
     DEFAULT_PWM = 100
     RPM_MAX = 200
@@ -238,7 +338,7 @@ class EarendilControlGui(QMainWindow):
     UART_ERROR_CODES = {"FE", "NE", "ORE", "PE", "DMA", "RTO"}
 
     # ── Operating mode (DISARM / MANUAL / AUTONOMOUS) ─────────────────────
-    #   drive/control mode (RPM/PWM) is a separate concept handled by _set_mode.
+    #   drive/control mode (RPM/DUTY) is a separate concept handled by _set_mode.
     #   Commands are sent over the same H7 terminal serial path as other cmds.
     OPERATING_MODES = {
         "disarm": {
@@ -288,11 +388,12 @@ class EarendilControlGui(QMainWindow):
         self.reader_thread: SerialReaderThread | None = None
         self.connected = False
 
-        self.mode = "RPM"               # "RPM" or "PWM"
+        self.mode = "RPM"               # "RPM" or "DUTY"
         self.current_rpm = self.DEFAULT_RPM
         self.current_pwm = self.DEFAULT_PWM
 
-        self._operating_mode = "disarm"          # "disarm" / "manual" / "auto"
+        self._operating_mode = "disarm"          # confirmed mode (H7 is source of truth)
+        self._pending_mode: str | None = None   # mode requested by user, awaiting H7 confirm
 
         self._active_move_key: str | None = None   # current movement key (W/A/S/D)
         self._move_held: set[str] = set()          # held movement keys
@@ -307,7 +408,7 @@ class EarendilControlGui(QMainWindow):
         self._uart_report_decoded: dict[str, list[str]] = {}
 
         # ── Build UI ───────────────────────────────────────────────────────
-        central = QWidget()
+        central = LogoBackgroundWidget("earendil_logo.png", opacity=1.0)
         self.setCentralWidget(central)
         main_layout = QHBoxLayout(central)
         main_layout.setContentsMargins(8, 8, 8, 8)
@@ -318,6 +419,7 @@ class EarendilControlGui(QMainWindow):
 
         # Left panel
         left_panel = QWidget()
+        left_panel.setObjectName("sidePanel")
         left_layout = QVBoxLayout(left_panel)
         left_layout.setContentsMargins(0, 0, 0, 0)
         left_layout.setSpacing(8)
@@ -354,6 +456,15 @@ class EarendilControlGui(QMainWindow):
         self._repeat_timer = QTimer(self)
         self._repeat_timer.setInterval(self.REPEAT_INTERVAL_MS)
         self._repeat_timer.timeout.connect(self._repeat_movement)
+
+        # ── Operating-mode confirmation timeout ───────────────────────────
+        # Started when a mode button sends a command; if the H7 does not
+        # reply with a `[MODE] ... active` line in time, we warn and keep
+        # the previously confirmed mode (no optimistic UI change).
+        self._pending_mode_timer = QTimer(self)
+        self._pending_mode_timer.setSingleShot(True)
+        self._pending_mode_timer.setInterval(self.OP_MODE_CONFIRM_TIMEOUT_MS)
+        self._pending_mode_timer.timeout.connect(self._on_pending_mode_timeout)
 
         # Prevent buttons from stealing keyboard focus (Space must always reach keyPressEvent)
         for btn in self.findChildren(QPushButton):
@@ -464,8 +575,8 @@ class EarendilControlGui(QMainWindow):
         btn_rpm.clicked.connect(lambda: self._set_mode("RPM"))
         lay.addWidget(btn_rpm)
 
-        btn_pwm = QPushButton("Mode PWM")
-        btn_pwm.clicked.connect(lambda: self._set_mode("PWM"))
+        btn_pwm = QPushButton("Mode DUTY")
+        btn_pwm.clicked.connect(lambda: self._set_mode("DUTY"))
         lay.addWidget(btn_pwm)
 
         self._btn_help = QPushButton("GUI Help")
@@ -871,6 +982,10 @@ class EarendilControlGui(QMainWindow):
 
     def _set_disconnected_ui(self):
         self.connected = False
+        # A pending mode change can never be confirmed while disconnected.
+        self._pending_mode = None
+        if self._pending_mode_timer.isActive():
+            self._pending_mode_timer.stop()
         self._lbl_status.setText("● Disconnected")
         self._lbl_status.setStyleSheet(
             "color: #B00020; font-weight: bold;"
@@ -896,6 +1011,7 @@ class EarendilControlGui(QMainWindow):
         self._log_rx(line)
         self._parse_rx_for_motor_state(line)
         self._parse_uart_error_line(line)
+        self._parse_operating_mode_confirm(line)
 
     def _parse_rx_for_motor_state(self, line: str):
         """Minimal parsing: update Link column if link-lost/recovered detected."""
@@ -979,6 +1095,74 @@ class EarendilControlGui(QMainWindow):
 
         return False
 
+    # ── Operating-mode confirmation parsing ─────────────────────────────────
+    #
+    # The H7 firmware (command_handler.c) prints a confirmation line after it
+    # actually applies an operating-mode change:
+    #     [MODE] DISARM active, motion commands locked
+    #     [MODE] MANUAL active
+    #     [MODE] AUTONOMOUS active
+    # The GUI treats this line as the single source of truth for the rover's
+    # operating mode: the Operating Mode indicator (text + color + LEDs) is
+    # updated only here, never optimistically when a mode button is clicked.
+
+    # Map the H7 mode name in the confirmation line to the GUI key.
+    _OP_MODE_CONFIRM_TO_KEY = {
+        "DISARM": "disarm",
+        "MANUAL": "manual",
+        "AUTONOMOUS": "auto",
+    }
+
+    def _parse_operating_mode_confirm(self, line: str) -> bool:
+        """Detect an H7 `[MODE] <NAME> active` confirmation line.
+
+        On a match, marks the mode as confirmed, updates the Operating Mode
+        indicator, and clears any pending request.  Returns True when the
+        line was recognized as a mode-confirmation line.
+        """
+        m = _RE_OP_MODE_CONFIRM.search(line)
+        self._log_gui("[DBG]", f"mode-conv repr={line!r} match={bool(m)}", "#C9831A")
+        if not m:
+            return False
+        mode_name = m.group(1)
+        mode_key = self._OP_MODE_CONFIRM_TO_KEY.get(mode_name)
+        if mode_key is None:
+            return True
+        was_pending = self._pending_mode
+        self._pending_mode = None
+        self._pending_mode_timer.stop()
+        self._update_operating_mode_ui(mode_key)
+        if was_pending == mode_key:
+            self._log_info(f"Operating mode confirmed by H7: {mode_name}")
+        elif was_pending is not None:
+            # H7 confirmed a mode different from what was requested last, or a
+            # mode change was triggered by the firmware itself; reflect it but
+            # flag the mismatch to the operator.
+            self._log_warn(
+                f"H7 confirmed mode {mode_name} (expected "
+                f"{self.OPERATING_MODES.get(was_pending, {}).get('label', was_pending)})"
+            )
+        else:
+            self._log_info(f"Operating mode: {mode_name}")
+        return True
+
+    def _on_pending_mode_timeout(self):
+        """Called when no H7 confirmation arrives for a requested mode change.
+
+        Keeps the previously confirmed Operating Mode indicator unchanged and
+        warns the operator that the change was not confirmed by the H7.
+        """
+        failed = self._pending_mode
+        self._pending_mode = None
+        if failed is None:
+            return
+        self._log_warn(
+            f"Mode change to "
+            f"{self.OPERATING_MODES.get(failed, {}).get('label', failed)} "
+            f"not confirmed by H7 — keeping current mode "
+            f"({self.OPERATING_MODES.get(self._operating_mode, {}).get('label', self._operating_mode)})."
+        )
+
     # ══════════════════════════════════════════════════════════════════════
     #  Serial Send
     # ══════════════════════════════════════════════════════════════════════
@@ -1015,20 +1199,32 @@ class EarendilControlGui(QMainWindow):
         return self.current_rpm if self.mode == "RPM" else self.current_pwm
 
     # ── Operating mode (DISARM / MANUAL / AUTONOMOUS) ─────────────────────
-    #   Distinct from the RPM/PWM drive mode below.  Commands go through the
+    #   Distinct from the RPM/DUTY drive mode below.  Commands go through the
     #   same _send_cmd path used by all other H7 terminal commands so that
     #   history/logging/disconnected handling stay consistent.
     def _set_operating_mode(self, mode_key: str):
-        """Send the operating-mode command to H7 and update the local UI."""
+        """Send an operating-mode command to H7 and wait for confirmation.
+
+        The GUI does NOT optimistically update the Operating Mode indicator
+        here.  The H7 serial output is the single source of truth: the
+        indicator only changes once a `[MODE] <NAME> active` confirmation line
+        is received (see _parse_operating_mode_confirm).  A pending request
+        is tracked so a timeout warning can be emitted if H7 does not reply.
+        """
         cfg = self.OPERATING_MODES.get(mode_key)
         if cfg is None:
             return
         self._send_cmd(cfg["command"])
-        self._update_operating_mode_ui(mode_key)
-        self._log_info(f"Operating mode: {cfg['label']}")
+        already_pending = self._pending_mode is not None
+        self._pending_mode = mode_key
+        self._pending_mode_timer.start()
+        if not already_pending:
+            self._log_info(
+                f"Requested {cfg['label']} — waiting for H7 confirmation..."
+            )
 
     def _update_operating_mode_ui(self, mode_key: str):
-        """Refresh the three LEDs and the status box for `mode_key`."""
+        """Refresh the three LEDs and the status box for the confirmed mode."""
         cfg = self.OPERATING_MODES.get(mode_key)
         if cfg is None:
             return
@@ -1063,19 +1259,19 @@ class EarendilControlGui(QMainWindow):
             )
             self._lbl_value_label.setText("RPM Value:")
             self._lbl_value.setText(str(self.current_rpm))
-            self._send_cmd("m rpm")
+            self._send_cmd("m speed")
         else:
             self._lbl_mode.setStyleSheet(
                 "color: #FFD66B; font-size: 16px; font-weight: bold;"
             )
-            self._lbl_value_label.setText("PWM Value:")
+            self._lbl_value_label.setText("Duty Value:")
             self._lbl_value.setText(str(self.current_pwm))
-            self._send_cmd("m pwm")
+            self._send_cmd("m duty")
         self._log_info(f"Mode changed to {new_mode}")
         self._lbl_qs_mode.setText(f"Mode: {new_mode}")
 
     def _toggle_mode(self):
-        self._set_mode("PWM" if self.mode == "RPM" else "RPM")
+        self._set_mode("DUTY" if self.mode == "RPM" else "RPM")
 
     def _adjust_value(self, delta: int):
         if self.mode == "RPM":
@@ -1085,7 +1281,7 @@ class EarendilControlGui(QMainWindow):
         else:
             self.current_pwm = max(0, min(self.PWM_MAX, self.current_pwm + delta))
             self._lbl_value.setText(str(self.current_pwm))
-            self._log_info(f"PWM value set to {self.current_pwm}")
+            self._log_info(f"Duty value set to {self.current_pwm}")
 
     # ══════════════════════════════════════════════════════════════════════
     #  Movement Command Mapping
@@ -1261,7 +1457,7 @@ class EarendilControlGui(QMainWindow):
             "<tr><td style='color:#FFD66B;'><b>S</b></td><td>Backward</td>"
             "<td style='color:#FFD66B;'><b>X</b></td><td>Brake</td></tr>"
             "<tr><td style='color:#FFD66B;'><b>A</b></td><td>Left</td>"
-            "<td style='color:#FFD66B;'><b>M</b></td><td>Toggle RPM/PWM</td></tr>"
+            "<td style='color:#FFD66B;'><b>M</b></td><td>Toggle RPM/DUTY</td></tr>"
             "<tr><td style='color:#FFD66B;'><b>D</b></td><td>Right</td>"
             "<td style='color:#FFD66B;'><b>I</b></td><td>Identify</td></tr>"
             "<tr><td style='color:#FFD66B;'><b>LShift</b></td><td>Value +5</td>"
@@ -1280,9 +1476,9 @@ class EarendilControlGui(QMainWindow):
         mode_html = (
             "<table style='font-size:13px; color:#C0C0C0;' cellspacing='4'>"
             "<tr><td style='color:#D4AF37;'><b>RPM mode:</b></td>"
-            "<td>W/S/A/D sends f/b/l/r&lt;number&gt;</td></tr>"
-            "<tr><td style='color:#D4AF37;'><b>PWM mode:</b></td>"
-            "<td>W/S/A/D sends fd/bd/ld/rd&lt;number&gt;</td></tr>"
+            "<td>W/S/A/D sends f/b/l/r&lt;number&gt;  (cmd: m speed)</td></tr>"
+            "<tr><td style='color:#D4AF37;'><b>DUTY mode:</b></td>"
+            "<td>W/S/A/D sends fd/bd/ld/rd&lt;number&gt;  (cmd: m duty)</td></tr>"
             "</table>"
             "<br>"
             "<span style='color:#8E8E93;'>Held key repeats every 500 ms</span>"

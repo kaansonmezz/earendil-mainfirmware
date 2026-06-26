@@ -1,9 +1,7 @@
 #include "terminal_parser.h"
-#include "activity_light.h"
 #include <string.h>
 #include <stdlib.h>
 #include <ctype.h>
-
 #define MAX_LINE_LEN 64
 
 #define RPM_MAX   200
@@ -108,52 +106,50 @@ bool TerminalParser_Parse(const char *line, TerminalCommand_t *outResult)
         return true;
     }
 
-    /* ── 6. m rpm (control mode) ─────────────────────────────────────── */
-    if (strcmp(buf, "m rpm") == 0)
+    /* ── 6. m speed (control mode) ──────────────────────────────────── */
+    if (strcmp(buf, "m speed") == 0)
     {
         outResult->type = TCMD_MODE_RPM;
         return true;
     }
 
-    /* ── 7. m pwm (control mode) ─────────────────────────────────────── */
-    if (strcmp(buf, "m pwm") == 0)
+    /* ── 7. m duty (control mode) ───────────────────────────────────── */
+    if (strcmp(buf, "m duty") == 0)
     {
         outResult->type = TCMD_MODE_PWM;
         return true;
     }
 
-    /* ── 8. mode (plain) ─────────────────────────────────────────────── */
+    /* ── 8. mode (plain query) ───────────────────────────────────────── */
     if (strcmp(buf, "mode") == 0)
     {
         outResult->type = TCMD_MODE_QUERY;
         return true;
     }
 
-    /* ── 9. drive mode────────────────────────────────────────────────── */
+    /* ── 9. Operating-mode transitions ─────────────────────────────────
+     * These are NOT executed here; the parser only classifies them as
+     * TCMD_OP_MODE.  command_handler.c routes them through OperatingMode_Set()
+     * which enforces the DISARM safety lock and GPIO/LED update. */
     if (strcmp(buf, "mode disarm") == 0)
     {
-        ActivityLight_SetMode(ROVER_MODE_DISARM);
-        outResult->type = TCMD_STOP;
-        outResult->motion.direction = DIR_STOP;
-        outResult->motion.speed = 0;
+        outResult->type   = TCMD_OP_MODE;
+        outResult->opMode = ROVER_MODE_DISARM;
         return true;
     }
 
     if (strcmp(buf, "mode manual") == 0)
     {
-        ActivityLight_SetMode(ROVER_MODE_MANUAL);
-        outResult->type = TCMD_STOP;
-        outResult->motion.direction = DIR_STOP;
-        outResult->motion.speed = 0;
+        outResult->type   = TCMD_OP_MODE;
+        outResult->opMode = ROVER_MODE_MANUAL;
         return true;
     }
 
-    if (strcmp(buf, "mode auto") == 0)
+    if (strcmp(buf, "mode auto") == 0 ||
+        strcmp(buf, "mode autonomous") == 0)
     {
-        ActivityLight_SetMode(ROVER_MODE_AUTONOMOUS);
-        outResult->type = TCMD_STOP;
-        outResult->motion.direction = DIR_STOP;
-        outResult->motion.speed = 0;
+        outResult->type   = TCMD_OP_MODE;
+        outResult->opMode = ROVER_MODE_AUTONOMOUS;
         return true;
     }
 

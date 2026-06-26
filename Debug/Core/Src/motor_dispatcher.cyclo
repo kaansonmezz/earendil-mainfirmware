@@ -1,6 +1,6 @@
-../Core/Src/motor_dispatcher.c:12:6:MotorDispatcher_Init	2
-../Core/Src/motor_dispatcher.c:20:6:MotorDispatcher_Send	8
-../Core/Src/motor_dispatcher.c:56:6:MotorDispatcher_SendAll	2
-../Core/Src/motor_dispatcher.c:64:6:MotorDispatcher_SendRaw	6
-../Core/Src/motor_dispatcher.c:89:14:MotorDispatcher_GetLink	2
-../Core/Src/motor_dispatcher.c:97:6:MotorDispatcher_Update	2
+../Core/Src/motor_dispatcher.c:15:6:MotorDispatcher_Init	2
+../Core/Src/motor_dispatcher.c:23:6:MotorDispatcher_Send	12
+../Core/Src/motor_dispatcher.c:75:6:MotorDispatcher_SendAll	2
+../Core/Src/motor_dispatcher.c:83:6:MotorDispatcher_SendRaw	6
+../Core/Src/motor_dispatcher.c:108:14:MotorDispatcher_GetLink	2
+../Core/Src/motor_dispatcher.c:116:6:MotorDispatcher_Update	2

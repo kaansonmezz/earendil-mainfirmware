@@ -540,10 +540,45 @@ void MPU_Config(void)
 void Error_Handler(void)
 {
   /* USER CODE BEGIN Error_Handler_Debug */
-  /* User can add his own implementation to report the HAL error return state */
+  /* Fatal fault: blink the red activity LED (PB0) so the fault is visible
+   * without a debugger.  IRQs are disabled first (so the fault state is not
+   * disturbed by interrupts), therefore HAL_Delay() cannot be used — it
+   * relies on the SysTick interrupt.  A rough busy-loop delay is used instead.
+   *
+   * PB0 is configured directly here (not via MX_GPIO_Init()) so the blink works
+   * even for faults raised during SystemClock_Config() or early HAL init,
+   * before MX_GPIO_Init() has run.  The GPIOB clock is enabled explicitly for
+   * the same reason. */
   __disable_irq();
+
+  __HAL_RCC_GPIOB_CLK_ENABLE();
+
+  GPIO_InitTypeDef GPIO_InitStruct = {0};
+  GPIO_InitStruct.Pin   = GPIO_PIN_0;
+  GPIO_InitStruct.Mode  = GPIO_MODE_OUTPUT_PP;
+  GPIO_InitStruct.Pull  = GPIO_NOPULL;
+  GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
+  HAL_GPIO_Init(GPIOB, &GPIO_InitStruct);
+
+  /* Red activity LED pin — same as activity_light.c LIGHT_RED (GPIOB PIN_0).
+   * Reused here directly (not via activity_light.c) so the fault indicator is
+   * independent of higher-level module state. */
+  const uint16_t led_pin = GPIO_PIN_0;
+
   while (1)
   {
+    HAL_GPIO_TogglePin(GPIOB, led_pin);
+
+    /* Busy-loop delay (~250 ms half-period at 480 MHz, -O0).  Not cycle-accurate;
+     * only needs to be slow enough to see.  volatile + __NOP() prevent the
+     * compiler from optimizing the loop away. */
+    for (volatile uint32_t outer = 0; outer < 25; outer++)
+    {
+      for (volatile uint32_t inner = 0; inner < 20000; inner++)
+      {
+        __NOP();
+      }
+    }
   }
   /* USER CODE END Error_Handler_Debug */
 }
