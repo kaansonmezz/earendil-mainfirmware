@@ -232,6 +232,16 @@ bool MotorTxDma_HasPending(MotorId_t motor)
     return s_channels[motor].pending;
 }
 
+bool MotorTxDma_AllIdle(void)
+{
+    for (int i = 0; i < MOTOR_TX_DMA_COUNT; i++)
+    {
+        if (s_channels[i].busy || s_channels[i].pending)
+            return false;
+    }
+    return true;
+}
+
 void MotorTxDma_CancelPending(void)
 {
     /* Drop every queued (not-yet-started) TX frame on all motor channels.

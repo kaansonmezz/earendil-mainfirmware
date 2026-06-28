@@ -2,10 +2,18 @@
 #include "control_mode.h"
 #include "motion_controller.h"
 #include "motor_dispatcher.h"
+#include "motor_tx_dma.h"
 #include "activity_light.h"
 #include "operating_mode.h"
 #include "safety_manager.h"
 #include "logger.h"
+#include <string.h>
+
+/* ── Tunables ───────────────────────────────────────────────────────────────
+ *  Bounded wait for the motor TX DMA path to drain during a synchronized
+ *  control-mode switch.  This is a main-loop context call (never ISR), so a
+ *  short blocking poll on the TX busy/pending flags is safe and bounded. */
+#define MODE_SWITCH_TX_DRAIN_MS 100U
 
 /* ── Helpers ──────────────────────────────────────────────────────────────── */
 
@@ -19,6 +27,36 @@ static const char *MotionPrefix(Direction_t dir, bool isDuty)
         case DIR_RIGHT:    return isDuty ? "rd" : "r";
         case DIR_LEFT:     return isDuty ? "ld" : "l";
         default:           return "?";
+    }
+}
+
+/* Direct-motor raw payloads that are safe in DISARM (queries / stop /
+ * brake / the documented control-mode switches).  Used by the DISARM
+ * gate to reject motion-causing raw payloads like `FL f100` while still
+ * allowing `FL status`, `FL identify`, `FL stop`, `FL x`,
+ * `FL mode speed`, `FL mode duty`.  The payload reaches here already
+ * lowercased and trimmed by the parser, so a plain strcmp is enough. */
+static bool IsSafeRawPayload(const char *p)
+{
+    if (p == NULL)
+        return false;
+    return (strcmp(p, "status")     == 0 ||
+            strcmp(p, "identify")  == 0 ||
+            strcmp(p, "stop")      == 0 ||
+            strcmp(p, "x")         == 0 ||
+            strcmp(p, "mode speed")== 0 ||
+            strcmp(p, "mode duty") == 0);
+}
+
+static const char *MotorTagName(MotorId_t id)
+{
+    switch (id)
+    {
+        case MOTOR_FL: return "FL";
+        case MOTOR_FR: return "FR";
+        case MOTOR_RL: return "RL";
+        case MOTOR_RR: return "RR";
+        default:        return "??";
     }
 }
 
@@ -63,6 +101,88 @@ static void HandleOperatingMode(RoverMode_t target)
     Logger_Log(LOG_INFO, "Motors stopped; send a motion command to move");
 }
 
+/* ── Synchronized control-mode switch (RPM <-> PWM) ──────────────────────────
+ *  The F411 motor controllers reject `mode speed` / `mode duty` while a motor
+ *  is still running, replying e.g. "[ERR] Stop motor first".  That would leave
+ *  H7 and F411 desynchronized (H7 believes it changed mode, F411 did not).
+ *
+ *  Safe policy implemented here:
+ *    1. Announce the switch.
+ *    2. Stop all motors first (`stop`), dropping any queued motion frame so
+ *       the stop leaves immediately instead of being stalled behind a pending
+ *       motion frame.
+ *    3. Wait for the stop frame to fully drain on every motor UART (bounded
+ *       poll on the TX DMA busy/pending flags).
+ *    4. Send the requested `mode speed` / `mode duty` to all controllers.
+ *    5. Only after every channel accepted the frame for TX dispatch, update
+ *       the local control mode.
+ *
+ *  ACK confirmation from the F411 is NOT used: the existing ACK/OK parsing is
+ *  not wired to raw commands (SendRaw does not register a pending ACK and the
+ *  RX callback only logs replies), so we must not fake full confirmation.  The
+ *  local mode is therefore advanced only after successful TX dispatch of the
+ *  mode command, and the log explicitly states the change was dispatched but
+ *  not fully ACK-confirmed. */
+static bool WaitForTxDrain(uint32_t timeoutMs)
+{
+    uint32_t start = HAL_GetTick();
+    while (!MotorTxDma_AllIdle())
+    {
+        if ((HAL_GetTick() - start) >= timeoutMs)
+            return false;
+    }
+    return true;
+}
+
+static void HandleControlModeSwitch(ControlMode_t target)
+{
+    const char *modeName = (target == CONTROL_MODE_RPM) ? "SPEED" : "DUTY";
+    const char *modeCmd  = (target == CONTROL_MODE_RPM) ? "mode speed" : "mode duty";
+
+    Logger_Log(LOG_INFO, "[MODE] Switching motor controllers to %s...", modeName);
+
+    /* 1. Stop all motors first so the F411s accept the mode command.
+     *    Cancel any queued (non-active) motion frame so `stop` leaves
+     *    immediately rather than sitting behind a pending motion frame. */
+    Logger_Log(LOG_INFO, "[MODE] Sending stop before mode change");
+    MotorTxDma_CancelPending();
+    MotorDispatcher_SendRaw("stop");
+
+    /* 2. Let the stop frame fully drain on every channel before issuing the
+     *    mode command—otherwise the mode command could be staged behind the
+     *    stop and arrive too early (or be dropped by the pending-slot policy). */
+    if (!WaitForTxDrain(MODE_SWITCH_TX_DRAIN_MS))
+    {
+        Logger_Log(LOG_ERROR,
+                   "[MODE] Stop TX did not drain within %ums; mode switch aborted, "
+                   "local control mode unchanged (%s)",
+                   (unsigned)MODE_SWITCH_TX_DRAIN_MS,
+                   ControlMode_ToString(ControlMode_Get()));
+        return;
+    }
+
+    /* 3. Dispatch the mode command to all motor controllers. */
+    if (!MotorDispatcher_SendRaw(modeCmd))
+    {
+        Logger_Log(LOG_ERROR,
+                   "[MODE] Failed to queue '%s' to one or more motors; "
+                   "local control mode unchanged (%s)",
+                   modeCmd,
+                   ControlMode_ToString(ControlMode_Get()));
+        return;
+    }
+    Logger_Log(LOG_INFO, "[MODE] Sent %s to all motors", modeCmd);
+
+    /* 4. Only now advance the local control mode — after successful TX
+     *    dispatch of the mode command.  Subsequent motion commands (e.g.
+     *    f100 in RPM mode) will then be encoded as `rpm 100` / `rpm -100`. */
+    ControlMode_Set(target);
+    Logger_Log(LOG_INFO, "[MODE] Local control mode set to %s", modeName);
+    Logger_Log(LOG_INFO,
+               "[MODE] Mode command dispatched, not fully ACK-confirmed "
+               "(F411 ACK parsing not wired for raw commands)");
+}
+
 /* ── Public functions ─────────────────────────────────────────────────────── */
 
 void CommandHandler_PrintHelp(void)
@@ -96,8 +216,19 @@ void CommandHandler_PrintHelp(void)
     Logger_Log(LOG_INFO, "Common commands:");
     Logger_Log(LOG_INFO, "  stop             Stop motors");
     Logger_Log(LOG_INFO, "  brake            Send brake command: x");
-    Logger_Log(LOG_INFO, "  identify         Send identify to all motor UARTs");
+    Logger_Log(LOG_INFO, "  identify         Arm motors, then send identify to all motor UARTs");
     Logger_Log(LOG_INFO, "  status           Send status to all motor UARTs");
+    Logger_Log(LOG_INFO, "");
+    Logger_Log(LOG_INFO, "Direct motor command:");
+    Logger_Log(LOG_INFO, "  FL <text>        Send raw text only to Front Left motor");
+    Logger_Log(LOG_INFO, "  FR <text>        Send raw text only to Front Right motor");
+    Logger_Log(LOG_INFO, "  RL <text>        Send raw text only to Rear Left motor");
+    Logger_Log(LOG_INFO, "  RR <text>        Send raw text only to Rear Right motor");
+    Logger_Log(LOG_INFO, "Examples:");
+    Logger_Log(LOG_INFO, "  FL status");
+    Logger_Log(LOG_INFO, "  FR identify");
+    Logger_Log(LOG_INFO, "  RL f100");
+    Logger_Log(LOG_INFO, "  RR mode speed");
     Logger_Log(LOG_INFO, "  help             Show this command list");
 }
 
@@ -122,6 +253,27 @@ void CommandHandler_Handle(const TerminalCommand_t *cmd)
             case TCMD_STOP:         /* stop (safe) */
             case TCMD_BRAKE:        /* brake (safe) */
                 allowed = true;
+                break;
+
+            case TCMD_MOTOR_RAW:
+                /* Empty payload (bare "FL") -> usage error, emit here so
+                 * the handler's main switch does not need a DISARM copy. */
+                if (cmd->rawPayload[0] == '\0')
+                {
+                    Logger_Log(LOG_ERROR,
+                               "Usage: FL <text> | FR <text> | "
+                               "RL <text> | RR <text>");
+                    return;
+                }
+                /* Otherwise only safe payloads may pass; motion-causing
+                 * raw commands (e.g. FL f100) are blocked. */
+                allowed = IsSafeRawPayload(cmd->rawPayload);
+                if (!allowed)
+                {
+                    Logger_Log(LOG_WARN,
+                               "[DISARM] Direct motor command blocked");
+                    return;
+                }
                 break;
 
             default:
@@ -183,15 +335,11 @@ void CommandHandler_Handle(const TerminalCommand_t *cmd)
             break;
 
         case TCMD_MODE_RPM:
-            ControlMode_Set(CONTROL_MODE_RPM);
-            Logger_Log(LOG_INFO, "Control mode set to RPM");
-            MotorDispatcher_SendRaw("mode speed");
+            HandleControlModeSwitch(CONTROL_MODE_RPM);
             break;
 
         case TCMD_MODE_PWM:
-            ControlMode_Set(CONTROL_MODE_PWM);
-            Logger_Log(LOG_INFO, "Control mode set to PWM");
-            MotorDispatcher_SendRaw("mode duty");
+            HandleControlModeSwitch(CONTROL_MODE_PWM);
             break;
 
         case TCMD_MODE_QUERY:
@@ -200,12 +348,50 @@ void CommandHandler_Handle(const TerminalCommand_t *cmd)
             break;
 
         case TCMD_IDENTIFY:
+            /* Arm the motor controllers first (separate line), then
+             * send the identify probe on its own line.  Waiting for the
+             * TX DMA path to drain between the two guarantees ordering and
+             * prevents the identify frame from being staged behind (or
+             * dropped by) the pending-slot policy of the arm frame. */
+            MotorDispatcher_SendRaw("arm service CURRENT_LIMITED_BENCH_SUPPLY");
+            if (!WaitForTxDrain(MODE_SWITCH_TX_DRAIN_MS))
+            {
+                Logger_Log(LOG_ERROR,
+                           "[IDENTIFY] Arm frame TX did not drain within %ums; "
+                           "identify not sent",
+                           (unsigned)MODE_SWITCH_TX_DRAIN_MS);
+                break;
+            }
             MotorDispatcher_SendRaw("identify");
             break;
 
         case TCMD_STATUS:
             MotorDispatcher_SendRaw("status");
             break;
+
+        case TCMD_MOTOR_RAW:
+        {
+            /* Bare motor tag with no payload -> usage error.
+             * (DISARM-empty-payload path already returned earlier.) */
+            if (cmd->rawPayload[0] == '\0')
+            {
+                Logger_Log(LOG_ERROR,
+                           "Usage: FL <text> | FR <text> | "
+                           "RL <text> | RR <text>");
+                break;
+            }
+
+            Logger_Log(LOG_INFO, "[RAW][%s] %s",
+                       MotorTagName(cmd->rawMotor), cmd->rawPayload);
+
+            if (!MotorDispatcher_SendRawToMotor(cmd->rawMotor,
+                                                cmd->rawPayload))
+            {
+                Logger_Log(LOG_ERROR, "Direct motor TX failed for %s",
+                           MotorTagName(cmd->rawMotor));
+            }
+            break;
+        }
 
         default:
             break;

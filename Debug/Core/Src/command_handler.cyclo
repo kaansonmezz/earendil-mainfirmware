@@ -1,6 +1,10 @@
-../Core/Src/command_handler.c:13:20:MotionPrefix	9
-../Core/Src/command_handler.c:28:6:Command_IsModeTransition	3
-../Core/Src/command_handler.c:33:6:Command_IsMotionCommand	3
-../Core/Src/command_handler.c:42:13:HandleOperatingMode	4
-../Core/Src/command_handler.c:68:6:CommandHandler_PrintHelp	1
-../Core/Src/command_handler.c:104:6:CommandHandler_Handle	21
+../Core/Src/command_handler.c:21:20:MotionPrefix	9
+../Core/Src/command_handler.c:39:13:IsSafeRawPayload	8
+../Core/Src/command_handler.c:51:20:MotorTagName	5
+../Core/Src/command_handler.c:66:6:Command_IsModeTransition	3
+../Core/Src/command_handler.c:71:6:Command_IsMotionCommand	3
+../Core/Src/command_handler.c:80:13:HandleOperatingMode	4
+../Core/Src/command_handler.c:126:13:WaitForTxDrain	3
+../Core/Src/command_handler.c:137:13:HandleControlModeSwitch	5
+../Core/Src/command_handler.c:188:6:CommandHandler_PrintHelp	1
+../Core/Src/command_handler.c:235:6:CommandHandler_Handle	27

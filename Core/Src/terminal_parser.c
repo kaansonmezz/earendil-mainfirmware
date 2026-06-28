@@ -120,6 +120,21 @@ bool TerminalParser_Parse(const char *line, TerminalCommand_t *outResult)
         return true;
     }
 
+    /* ── 7b. mode speed / mode duty (control mode aliases) ────────────
+     *  Same synchronized control-mode switch as `m speed` / `m duty`.
+     *  These are distinct from the rover operating-mode commands
+     *  (`mode disarm`/`mode manual`/`mode auto`) parsed below. */
+    if (strcmp(buf, "mode speed") == 0)
+    {
+        outResult->type = TCMD_MODE_RPM;
+        return true;
+    }
+    if (strcmp(buf, "mode duty") == 0)
+    {
+        outResult->type = TCMD_MODE_PWM;
+        return true;
+    }
+
     /* ── 8. mode (plain query) ───────────────────────────────────────── */
     if (strcmp(buf, "mode") == 0)
     {
@@ -151,6 +166,67 @@ bool TerminalParser_Parse(const char *line, TerminalCommand_t *outResult)
         outResult->type   = TCMD_OP_MODE;
         outResult->opMode = ROVER_MODE_AUTONOMOUS;
         return true;
+    }
+
+    /* ── 9b. Direct motor raw commands: FL/FR/RL/RR <text> ─────────────
+     *  Must be parsed before the single-letter motion commands (e.g.
+     *  "FL f100" must not fall through to the f<number> branch).
+     *  Requires the tag, a single separating space, then a non-empty
+     *  payload ("FLstatus" and bare "FL" do not match this branch the
+     *  same way — bare tags are flagged as usage-error, run-ons are
+     *  rejected entirely).  Only one ASCII space separates tag and
+     *  payload; internal payload spaces are preserved.  buf is already
+     *  lowercased at this point, so case-insensitive matching is free. */
+    if (len >= 2 &&
+        (buf[0] == 'f' || buf[0] == 'r') &&
+        (buf[1] == 'l' || buf[1] == 'r'))
+    {
+        MotorId_t id = MOTOR_COUNT;
+        if      (buf[0] == 'f' && buf[1] == 'l') id = MOTOR_FL;
+        else if (buf[0] == 'f' && buf[1] == 'r') id = MOTOR_FR;
+        else if (buf[0] == 'r' && buf[1] == 'l') id = MOTOR_RL;
+        else if (buf[0] == 'r' && buf[1] == 'r') id = MOTOR_RR;
+
+        if (id != MOTOR_COUNT)
+        {
+            /* Bare tag: "FL" (no payload).  Recognize so the handler can
+             * emit a clear usage error instead of "unknown command". */
+            if (len == 2)
+            {
+                outResult->type            = TCMD_MOTOR_RAW;
+                outResult->rawMotor        = id;
+                outResult->rawPayload[0]   = '\0';
+                return true;
+            }
+
+            /* Must be followed by exactly one space, then a non-empty
+             * payload.  "FLstatus" (no space) is rejected here and will
+             * fall through as unknown — it is NOT interpreted as
+             * "FL status". */
+            if (buf[2] == ' ')
+            {
+                const char *payload = buf + 3;
+                size_t plen = len - 3;
+                if (plen > 0 && plen < sizeof(outResult->rawPayload))
+                {
+                    outResult->type     = TCMD_MOTOR_RAW;
+                    outResult->rawMotor = id;
+                    memcpy(outResult->rawPayload, payload, plen + 1);
+                    return true;
+                }
+                /* Payload empty or too long after "FL " — treat as
+                 * bare-tag usage error for consistency. */
+                if (plen == 0)
+                {
+                    outResult->type          = TCMD_MOTOR_RAW;
+                    outResult->rawMotor      = id;
+                    outResult->rawPayload[0] = '\0';
+                    return true;
+                }
+                /* plen too long: fall through to "unknown" return below */
+            }
+            /* else: run-on like "FLstatus" — fall through (unknown cmd) */
+        }
     }
 
     /* ── 10. fd / bd / rd / ld (duty, value 0..255) ──────────────────── */

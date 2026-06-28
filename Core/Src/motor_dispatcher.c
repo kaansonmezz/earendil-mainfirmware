@@ -80,19 +80,23 @@ void MotorDispatcher_SendAll(const MotorCmd_t cmds[MOTOR_COUNT])
     }
 }
 
-void MotorDispatcher_SendRaw(const char *msg)
+bool MotorDispatcher_SendRaw(const char *msg)
 {
     if (msg == NULL)
-        return;
+        return false;
 
     const char *names[] = {"FL", "FR", "RL", "RR"};
+    bool allOk = true;
 
     for (int i = 0; i < MOTOR_COUNT; i++)
     {
         char frame[64];
         int len = snprintf(frame, sizeof(frame), "%s\r\n", msg);
         if (len <= 0 || (uint16_t)len >= sizeof(frame))
+        {
+            allOk = false;
             continue;
+        }
 
         if (MotorTxDma_Send((MotorId_t)i, frame))
         {
@@ -101,8 +105,24 @@ void MotorDispatcher_SendRaw(const char *msg)
         else
         {
             Logger_Log(LOG_ERROR, "UART TX failed for motor %s raw", names[i]);
+            allOk = false;
         }
     }
+
+    return allOk;
+}
+
+bool MotorDispatcher_SendRawToMotor(MotorId_t motor, const char *msg)
+{
+    if (msg == NULL || motor >= MOTOR_COUNT)
+        return false;
+
+    char frame[64];
+    int len = snprintf(frame, sizeof(frame), "%s\r\n", msg);
+    if (len <= 0 || (uint16_t)len >= sizeof(frame))
+        return false;
+
+    return MotorTxDma_Send(motor, frame);
 }
 
 MotorLink_t *MotorDispatcher_GetLink(MotorId_t id)

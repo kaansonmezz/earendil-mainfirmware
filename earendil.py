@@ -99,16 +99,29 @@ class LogoBackgroundWidget(QWidget):
         super().__init__(parent)
         self.logo = self._trim_alpha(QPixmap(logo_path))
         self.opacity = opacity
+        # Background base color is theme-aware; updated by the main window's
+        # _apply_theme().  Default is the dark theme base.
+        self.background_color = "#101014"
         self._logo_missing = self.logo.isNull()
         if self._logo_missing:
             print(f"[GUI-WARN] Background logo could not be loaded: {logo_path}")
 
+    def set_background_color(self, color: str):
+        """Update the painted base color and trigger a repaint."""
+        self.background_color = color
+        self.update()
+
+    def set_opacity(self, opacity: float):
+        """Adjust the watermark opacity (e.g. lighter in light theme)."""
+        self.opacity = opacity
+        self.update()
+
     def paintEvent(self, event):
-        # Paint a solid dark base so the watermark always sits on the theme
+        # Paint a solid base so the watermark always sits on the theme
         # background, then draw the logo in the bottom-left corner at low
         # opacity. Child widgets composite over this in Qt's normal paint order.
         painter = QPainter(self)
-        painter.fillRect(self.rect(), QColor("#101014"))
+        painter.fillRect(self.rect(), QColor(self.background_color))
 
         if self.logo.isNull():
             return
@@ -216,98 +229,180 @@ class EarendilControlGui(QMainWindow):
     Left side: control panels.  Right side: serial console.
     """
 
-    # ── Styling ────────────────────────────────────────────────────────────
-    STYLE = """
-    QMainWindow {
-        background-color: #101014;
+    # ── Theme palettes ───────────────────────────────────────────────────────
+    #  Semantic color keys used everywhere instead of raw hex.  The dark
+    #  palette reproduces the original gold/dark theme exactly.  The light
+    #  palette is a clean white/grey alternative that keeps the semantic
+    #  accents (red/amber/green) meaningful.
+    DARK_COLORS = {
+        "bg_main":            "#101014",
+        "bg_panel":           "transparent",
+        "bg_input":           "#2A2A31",
+        "bg_console":         "#0B0B0D",
+        "bg_table":           "#0B0B0D",
+        "table_header":       "#1E1E24",
+        "gridline":            "#2A2A31",
+        "text":               "#C0C0C0",
+        "text_muted":         "#8E8E93",
+        "border":             "#5F5A4A",
+        "accent_gold":        "#D4AF37",
+        "accent_gold_bright": "#FFD66B",
+        "danger":             "#B00020",
+        "danger_bright":      "#E02020",
+        "success":            "#1e6e3e",
+        "success_bright":     "#3CB371",
+        "warning":            "#C9831A",
+        "selection_bg":       "#3A3320",
+        "selection_border":   "#8A6F2A",
+        "pressed_bg":         "#4A4230",
+        "led_inactive_bg":    "#2A2A31",
+        "led_inactive_border":"#3A3A3A",
+        "logo_opacity":       1.0,
+        "manual_status_fg":   "#101014",
+        "placeholder_text":   "#8E8E93",
+        "font_weight":        "normal",
     }
-    QWidget {
-        color: #C0C0C0;
-        font-size: 13px;
+
+    LIGHT_COLORS = {
+        "bg_main":            "#F4F5F7",
+        "bg_panel":           "transparent",
+        "bg_input":           "#FFFFFF",
+        "bg_console":         "#FAFAFA",
+        "bg_table":           "#FFFFFF",
+        "table_header":       "#E9EAEE",
+        "gridline":            "#E0E0E0",
+        "text":               "#000000",
+        "text_muted":         "#000000",
+        "border":             "#C7C9D1",
+        "accent_gold":        "#000000",   # light theme: all text black
+        "accent_gold_bright": "#000000",
+        "danger":             "#C5221F",
+        "danger_bright":      "#D93025",
+        "success":            "#1E8E3E",
+        "success_bright":     "#1E8E3E",
+        "warning":            "#B06000",
+        "selection_bg":       "#E8E2C9",
+        "selection_border":   "#B8860B",
+        "pressed_bg":         "#DADCE0",
+        "led_inactive_bg":    "#DADCE0",
+        "led_inactive_border":"#BDC1C6",
+        "logo_opacity":       0.10,
+        "manual_status_fg":   "#000000",
+        "placeholder_text":   "#5F6368",
+        "font_weight":        "bold",
     }
-    /* Container widgets stay transparent so the centered background logo
-       (painted on the central widget) shows through the panel gaps. */
-    QSplitter {
-        background: transparent;
-    }
-    QWidget#sidePanel {
-        background: transparent;
-    }
-    QGroupBox {
-        background-color: transparent;
-        border: 1px solid #5F5A4A;
-        border-radius: 6px;
-        margin-top: 10px;
-        padding-top: 14px;
-        font-weight: bold;
-    }
-    QGroupBox::title {
-        subcontrol-origin: margin;
-        left: 12px;
-        padding: 0 6px;
-        color: #D4AF37;
-    }
-    QPushButton {
-        background-color: #2A2A31;
-        border: 1px solid #5F5A4A;
-        border-radius: 6px;
-        padding: 6px 14px;
-        min-height: 28px;
-        color: #C0C0C0;
-    }
-    QPushButton:hover {
-        background-color: #3A3320;
-        border-color: #8A6F2A;
-    }
-    QPushButton:pressed {
-        background-color: #4A4230;
-    }
-    QComboBox, QLineEdit {
-        background-color: #2A2A31;
-        border: 1px solid #5F5A4A;
-        border-radius: 4px;
-        padding: 4px 8px;
-        color: #C0C0C0;
-    }
-    QComboBox QAbstractItemView {
-        background-color: #2A2A31;
-        border: 1px solid #5F5A4A;
-        selection-background-color: #3A3320;
-        color: #C0C0C0;
-    }
-    QTableWidget {
-        background-color: #0B0B0D;
-        border: 1px solid #5F5A4A;
-        border-radius: 4px;
-        gridline-color: #2A2A31;
-        selection-background-color: #3A3320;
-        color: #C0C0C0;
-    }
-    QTableWidget::item {
-        padding: 4px;
-    }
-    QHeaderView::section {
-        background-color: #1E1E24;
-        color: #D4AF37;
-        border: none;
-        border-right: 1px solid #5F5A4A;
-        border-bottom: 1px solid #5F5A4A;
-        padding: 4px;
-        font-weight: bold;
-    }
-    QTextEdit {
-        background-color: #0B0B0D;
-        border: 1px solid #5F5A4A;
-        border-radius: 4px;
-        color: #C0C0C0;
-        font-family: 'Consolas', 'Courier New', monospace;
-        font-size: 12px;
-    }
-    QSplitter::handle {
-        background-color: #5F5A4A;
-        width: 3px;
-    }
-    """
+
+    THEMES = {"dark": DARK_COLORS, "light": LIGHT_COLORS}
+
+    def _colors(self) -> dict:
+        """Return the palette dict for the current theme."""
+        return self.THEMES[self.current_theme]
+
+    def _build_app_stylesheet(self) -> str:
+        """Generate the project-wide QSS from the active theme palette.
+
+        Reproduces the original dark theme exactly when the dark palette is
+        active; produces the light theme otherwise.  Inline widget styles that
+        need theme-aware values live in dedicated helper methods.
+        """
+        c = self._colors()
+        return f"""
+        QMainWindow {{
+            background-color: {c['bg_main']};
+        }}
+        QWidget {{
+            color: {c['text']};
+            font-size: 13px;
+            font-weight: {c['font_weight']};
+        }}
+        /* Container widgets stay transparent so the centered background logo
+           (painted on the central widget) shows through the panel gaps. */
+        QSplitter {{
+            background: transparent;
+        }}
+        QWidget#sidePanel {{
+            background: transparent;
+        }}
+        QGroupBox {{
+            background-color: {c['bg_panel']};
+            border: 1px solid {c['border']};
+            border-radius: 6px;
+            margin-top: 10px;
+            padding-top: 14px;
+            font-weight: bold;
+            color: {c['text']};
+        }}
+        QGroupBox::title {{
+            subcontrol-origin: margin;
+            left: 12px;
+            padding: 0 6px;
+            color: {c['accent_gold']};
+        }}
+        QPushButton {{
+            background-color: {c['bg_input']};
+            border: 1px solid {c['border']};
+            border-radius: 6px;
+            padding: 6px 14px;
+            min-height: 28px;
+            color: {c['text']};
+            font-weight: {c['font_weight']};
+        }}
+        QPushButton:hover {{
+            background-color: {c['selection_bg']};
+            border-color: {c['selection_border']};
+        }}
+        QPushButton:pressed {{
+            background-color: {c['pressed_bg']};
+        }}
+        QComboBox, QLineEdit {{
+            background-color: {c['bg_input']};
+            border: 1px solid {c['border']};
+            border-radius: 4px;
+            padding: 4px 8px;
+            color: {c['text']};
+            font-weight: {c['font_weight']};
+        }}
+        QComboBox QAbstractItemView {{
+            background-color: {c['bg_input']};
+            border: 1px solid {c['border']};
+            selection-background-color: {c['selection_bg']};
+            color: {c['text']};
+        }}
+        QTableWidget {{
+            background-color: {c['bg_table']};
+            border: 1px solid {c['border']};
+            border-radius: 4px;
+            gridline-color: {c['gridline']};
+            selection-background-color: {c['selection_bg']};
+            color: {c['text']};
+            font-weight: {c['font_weight']};
+        }}
+        QTableWidget::item {{
+            padding: 4px;
+        }}
+        QHeaderView::section {{
+            background-color: {c['table_header']};
+            color: {c['accent_gold']};
+            border: none;
+            border-right: 1px solid {c['border']};
+            border-bottom: 1px solid {c['border']};
+            padding: 4px;
+            font-weight: bold;
+        }}
+        QTextEdit {{
+            background-color: {c['bg_console']};
+            border: 1px solid {c['border']};
+            border-radius: 4px;
+            color: {c['text']};
+            font-family: 'Consolas', 'Courier New', monospace;
+            font-size: 12px;
+            font-weight: {c['font_weight']};
+        }}
+        QSplitter::handle {{
+            background-color: {c['border']};
+            width: 3px;
+        }}
+        """
 
     # ── Constants ──────────────────────────────────────────────────────────
     REPEAT_INTERVAL_MS = 500
@@ -381,9 +476,10 @@ class EarendilControlGui(QMainWindow):
         super().__init__()
         self.setWindowTitle("Earendil — Rover Control")
         self.setMinimumSize(1100, 650)
-        self.setStyleSheet(self.STYLE)
 
         # ── State ──────────────────────────────────────────────────────────
+        self.current_theme = "dark"            # "dark" or "light"
+
         self.ser: serial.Serial | None = None
         self.reader_thread: SerialReaderThread | None = None
         self.connected = False
@@ -408,7 +504,8 @@ class EarendilControlGui(QMainWindow):
         self._uart_report_decoded: dict[str, list[str]] = {}
 
         # ── Build UI ───────────────────────────────────────────────────────
-        central = LogoBackgroundWidget("earendil_logo.png", opacity=1.0)
+        self._central = LogoBackgroundWidget("earendil_logo.png", opacity=1.0)
+        central = self._central
         self.setCentralWidget(central)
         main_layout = QHBoxLayout(central)
         main_layout.setContentsMargins(8, 8, 8, 8)
@@ -474,6 +571,10 @@ class EarendilControlGui(QMainWindow):
         self._h7_input.installEventFilter(self)
         self.setFocusPolicy(Qt.StrongFocus)
 
+        # Apply the active theme to all widgets (stylesheet + inline styles +
+        # background logo).  Done last so all widgets exist before re-styling.
+        self._apply_theme()
+
         self._log_info("Ready. Connect to rover to begin.")
 
     # ══════════════════════════════════════════════════════════════════════
@@ -505,6 +606,7 @@ class EarendilControlGui(QMainWindow):
 
         self._btn_connect = QPushButton("Connect")
         self._btn_connect.setFixedWidth(105)
+        # Initial dark-theme default; _apply_theme() re-styles for the active theme.
         self._btn_connect.setStyleSheet("QPushButton { background-color: #1e6e3e; color: #C0C0C0; }")
         self._btn_connect.clicked.connect(self._toggle_connection)
         lay.addWidget(self._btn_connect)
@@ -524,25 +626,30 @@ class EarendilControlGui(QMainWindow):
         lay.setContentsMargins(8, 4, 8, 4)
         lay.setSpacing(16)
 
+        c = self._colors()
+
         def _badge(initial: str, color: str) -> QLabel:
             lbl = QLabel(initial)
-            lbl.setStyleSheet(
-                f"color: {color}; font-weight: bold; "
-                "background-color: #0B0B0D; border: 1px solid #5F5A4A; "
-                "border-radius: 4px; padding: 4px 10px;"
-            )
+            lbl.setStyleSheet(self._style_badge(color))
             return lbl
 
-        self._lbl_qs_mode = _badge("Mode: RPM", "#D4AF37")
+        self._lbl_qs_mode = _badge("Mode: RPM", c['accent_gold'])
         lay.addWidget(self._lbl_qs_mode)
 
-        self._lbl_qs_motion = _badge("Motion: IDLE", "#5F5A4A")
+        self._lbl_qs_motion = _badge("Motion: IDLE", c['text_muted'])
         lay.addWidget(self._lbl_qs_motion)
 
-        self._lbl_qs_port = _badge("Port: Disconnected", "#B00020")
+        self._lbl_qs_port = _badge("Port: Disconnected", c['danger'])
         lay.addWidget(self._lbl_qs_port)
 
         lay.addStretch()
+
+        # Theme toggle button — only changes visual theme, never sends a
+        # serial command.  Text reflects the theme we will switch TO.
+        self._btn_theme = QPushButton("Light Mode")
+        self._btn_theme.setFixedWidth(100)
+        self._btn_theme.clicked.connect(self._toggle_theme)
+        lay.addWidget(self._btn_theme)
         return grp
 
     def _build_mode_value_group(self) -> QGroupBox:
@@ -590,32 +697,6 @@ class EarendilControlGui(QMainWindow):
 
         return grp
 
-    # ── LED helper ────────────────────────────────────────────────────────
-    @staticmethod
-    def _make_led() -> QFrame:
-        """Small circular LED widget (inactive/dim by default)."""
-        led = QFrame()
-        led.setFixedSize(18, 18)
-        led.setStyleSheet(
-            "QFrame { background-color: #2A2A31; border: 1px solid #3A3A3A; "
-            "border-radius: 9px; }"
-        )
-        return led
-
-    @staticmethod
-    def _style_led(led: QFrame, color: str | None):
-        """Apply active (`color`) or inactive (None) styling to an LED."""
-        if color is None:
-            led.setStyleSheet(
-                "QFrame { background-color: #2A2A31; border: 1px solid #3A3A3A; "
-                "border-radius: 9px; }"
-            )
-        else:
-            led.setStyleSheet(
-                f"QFrame {{ background-color: {color}; border: 1px solid {color}; "
-                f"border-radius: 9px; }}"
-            )
-
     def _build_operating_mode_group(self) -> QGroupBox:
         grp = QGroupBox("Operating Mode")
         grp.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
@@ -646,11 +727,9 @@ class EarendilControlGui(QMainWindow):
         self._lbl_op_mode_status.setAlignment(Qt.AlignCenter)
         self._lbl_op_mode_status.setFixedHeight(34)
         self._lbl_op_mode_status.setFixedWidth(380)
-        self._lbl_op_mode_status.setStyleSheet(
-            "QLabel { background-color: #B00020; color: #FFFFFF; "
-            "font-size: 16px; font-weight: bold; "
-            "border: 1px solid #5F5A4A; border-radius: 6px; }"
-        )
+        # Initial styling follows the confirmed operating mode; _apply_theme()
+        # and _update_operating_mode_ui() keep it theme-aware afterwards.
+        self._style_operating_mode_status(self.OPERATING_MODES["disarm"])
         right_col.addWidget(self._lbl_op_mode_status)
 
         btn_row = QHBoxLayout()
@@ -757,13 +836,10 @@ class EarendilControlGui(QMainWindow):
         """Update the Motion badge in Rover Status.  direction is one of W/S/A/D or None for IDLE."""
         mapping = {"W": "FORWARD", "S": "BACKWARD", "A": "LEFT", "D": "RIGHT"}
         text = mapping.get(direction, "IDLE")
-        color = "#FFD66B" if text != "IDLE" else "#5F5A4A"
+        c = self._colors()
+        color = c['accent_gold_bright'] if text != "IDLE" else c['text_muted']
         self._lbl_qs_motion.setText(f"Motion: {text}")
-        self._lbl_qs_motion.setStyleSheet(
-            f"color: {color}; font-weight: bold; "
-            "background-color: #0B0B0D; border: 1px solid #5F5A4A; "
-            "border-radius: 4px; padding: 4px 10px;"
-        )
+        self._lbl_qs_motion.setStyleSheet(self._style_badge(color))
 
     def _build_console_group(self) -> QGroupBox:
         grp = QGroupBox("Console")
@@ -777,11 +853,11 @@ class EarendilControlGui(QMainWindow):
         h7_lay.setContentsMargins(0, 0, 0, 0)
         h7_lay.setSpacing(4)
 
-        h7_label = QLabel("H7 Console")
-        h7_label.setStyleSheet(
+        self._lbl_h7_console_title = QLabel("H7 Console")
+        self._lbl_h7_console_title.setStyleSheet(
             "color: #D4AF37; font-weight: bold; font-size: 13px;"
         )
-        h7_lay.addWidget(h7_label)
+        h7_lay.addWidget(self._lbl_h7_console_title)
 
         self._h7_console = QTextEdit()
         self._h7_console.setReadOnly(True)
@@ -823,11 +899,11 @@ class EarendilControlGui(QMainWindow):
         gui_lay.setContentsMargins(0, 0, 0, 0)
         gui_lay.setSpacing(4)
 
-        gui_label = QLabel("GUI Console")
-        gui_label.setStyleSheet(
+        self._lbl_gui_console_title = QLabel("GUI Console")
+        self._lbl_gui_console_title.setStyleSheet(
             "color: #8E8E93; font-weight: bold; font-size: 13px;"
         )
-        gui_lay.addWidget(gui_label)
+        gui_lay.addWidget(self._lbl_gui_console_title)
 
         self._gui_console = QTextEdit()
         self._gui_console.setReadOnly(True)
@@ -855,41 +931,250 @@ class EarendilControlGui(QMainWindow):
         return grp
 
     # ══════════════════════════════════════════════════════════════════════
+    #  Theme Management
+    # ══════════════════════════════════════════════════════════════════════
+    #
+    #  Theme switching is purely visual.  _toggle_theme() flips self.current_theme,
+    #  regenerates the stylesheet, restyles every theme-aware inline style and
+    #  repaints dynamic widgets to match the current state — WITHOUT touching
+    #  runtime state (serial connection, values, operating mode, pending mode,
+    #  console contents, motor/IMU tables).
+
+    def _toggle_theme(self):
+        """Switch between dark and light theme.  No serial I/O."""
+        self.current_theme = "light" if self.current_theme == "dark" else "dark"
+        self._apply_theme()
+        self._btn_theme.setText("Light Mode" if self.current_theme == "dark" else "Dark Mode")
+        label = "LIGHT" if self.current_theme == "light" else "DARK"
+        self._log_info(f"Theme switched to {label}")
+
+    def _apply_theme(self):
+        """Apply the active palette to the global stylesheet, theme-aware
+        inline widget styles, the background logo, and re-render dynamic
+        widgets according to the current runtime state.  Runtime state is
+        never changed here.
+        """
+        self.setStyleSheet(self._build_app_stylesheet())
+
+        c = self._colors()
+
+        # Background logo base color + opacity for the active theme.
+        self._central.set_background_color(c['bg_main'])
+        self._central.set_opacity(c['logo_opacity'])
+
+        # ── Static (builder-set) widgets re-styled to the active theme ──
+        self._style_connection_button()
+        self._style_connection_status()
+        self._style_console_widgets()
+        self._style_help_button()
+        if hasattr(self, "_lbl_op_mode_status"):
+            self._update_operating_mode_ui(self._operating_mode)
+
+        # ── Dynamic state-driven widgets re-rendered to the active theme ──
+        # Quick-status mode badge (RPM/DUTY)
+        if hasattr(self, "_lbl_qs_mode"):
+            self._lbl_qs_mode.setText(f"Mode: {self.mode}")
+            self._lbl_qs_mode.setStyleSheet(self._style_badge(c['accent_gold']))
+        # Quick-status motion badge
+        if hasattr(self, "_lbl_qs_motion"):
+            self._update_motion_indicator(self._active_move_key)
+        # Quick-status port badge + connection status label
+        if self.connected and self.ser and self.ser.port:
+            self._lbl_qs_port.setText(f"Port: {self.ser.port}")
+            self._lbl_qs_port.setStyleSheet(self._style_badge(c['accent_gold']))
+        else:
+            self._lbl_qs_port.setText("Port: Disconnected")
+            self._lbl_qs_port.setStyleSheet(self._style_badge(c['danger']))
+        # Mode label + value label (RPM gold / DUTY amber)
+        if hasattr(self, "_lbl_mode"):
+            self._style_mode_value_labels()
+
+    # ── Theme-aware style string helpers ───────────────────────────────────
+
+    def _style_badge(self, text_color: str) -> str:
+        """Style string for a quick-status badge label."""
+        c = self._colors()
+        return (
+            f"color: {text_color}; font-weight: bold; "
+            f"background-color: {c['bg_console']}; border: 1px solid {c['border']}; "
+            "border-radius: 4px; padding: 4px 10px;"
+        )
+
+    def _style_connection_button(self):
+        """Style the Connect/Disconnect button for the active theme + state."""
+        c = self._colors()
+        if self.connected:
+            self._btn_connect.setStyleSheet(
+                f"QPushButton {{ background-color: {c['danger']}; "
+                f"color: {c['text']}; }}"
+            )
+        else:
+            self._btn_connect.setStyleSheet(
+                f"QPushButton {{ background-color: {c['success']}; "
+                f"color: {c['text']}; }}"
+            )
+
+    def _style_connection_status(self):
+        """Style the ● Connected / ● Disconnected label."""
+        c = self._colors()
+        color = c['accent_gold'] if self.connected else c['danger']
+        self._lbl_status.setStyleSheet(
+            f"color: {color}; font-weight: bold;"
+        )
+
+    def _style_console_widgets(self):
+        """Re-style the H7 console, GUI console, H7 input, Send button and
+        their section labels for the active theme."""
+        c = self._colors()
+
+        self._h7_console.setStyleSheet(
+            f"QTextEdit {{ background-color: {c['bg_console']}; "
+            f"border: 1px solid {c['accent_gold']}; "
+            f"border-radius: 4px; color: {c['text']}; "
+            "font-family: 'Consolas', 'Courier New', monospace; font-size: 12px; }"
+        )
+
+        self._h7_input.setStyleSheet(
+            f"QLineEdit {{ background-color: {c['bg_input']}; "
+            f"border: 1px solid {c['accent_gold']}; "
+            f"border-radius: 4px; padding: 4px 8px; color: {c['text']}; }}"
+        )
+        # QLineEdit placeholder color is not settable via QSS portably; keep
+        # default (handled by palette inherited from Fusion + stylesheet text).
+
+        self._btn_h7_send.setStyleSheet(
+            f"QPushButton {{ background-color: {c['bg_input']}; "
+            f"border: 1px solid {c['accent_gold']}; "
+            f"border-radius: 6px; padding: 4px 14px; color: {c['accent_gold']}; "
+            f"font-weight: bold; }}"
+            f"QPushButton:hover {{ background-color: {c['selection_bg']}; }}"
+        )
+
+        # Keep references to the section labels so they can be re-themed.
+        if hasattr(self, "_lbl_h7_console_title"):
+            self._lbl_h7_console_title.setStyleSheet(
+                f"color: {c['accent_gold']}; font-weight: bold; font-size: 13px;"
+            )
+        if hasattr(self, "_lbl_gui_console_title"):
+            self._lbl_gui_console_title.setStyleSheet(
+                f"color: {c['text_muted']}; font-weight: bold; font-size: 13px;"
+            )
+
+        self._gui_console.setStyleSheet(
+            f"QTextEdit {{ background-color: {c['bg_console']}; "
+            f"border: 1px solid {c['border']}; "
+            f"border-radius: 4px; color: {c['text_muted']}; "
+            "font-family: 'Consolas', 'Courier New', monospace; font-size: 12px; }"
+        )
+
+    def _style_help_button(self):
+        """Style the GUI Help button for the active theme."""
+        c = self._colors()
+        self._btn_help.setStyleSheet(
+            f"QPushButton {{ background-color: {c['bg_input']}; "
+            f"border: 1px solid {c['accent_gold']}; "
+            f"color: {c['accent_gold']}; font-weight: bold; }}"
+            f"QPushButton:hover {{ background-color: {c['selection_bg']}; }}"
+        )
+
+    def _style_mode_value_labels(self):
+        """Re-style the Mode label + Value label for the active theme + mode."""
+        c = self._colors()
+        if self.mode == "RPM":
+            mode_color = c['accent_gold']
+            value_color = c['accent_gold_bright']
+        else:
+            mode_color = c['accent_gold_bright']
+            value_color = c['accent_gold_bright']
+        self._lbl_mode.setStyleSheet(
+            f"color: {mode_color}; font-size: 16px; font-weight: bold;"
+        )
+        self._lbl_value.setStyleSheet(
+            f"color: {value_color}; font-size: 18px; font-weight: bold;"
+        )
+
+    def _style_operating_mode_status(self, cfg: dict):
+        """Style the Operating Mode status box.  The semantic background
+        (DISARM red / MANUAL amber / AUTONOMOUS green) is preserved across
+        themes; only the surrounding border adapts."""
+        c = self._colors()
+        self._lbl_op_mode_status.setStyleSheet(
+            f"QLabel {{ background-color: {cfg['status_bg']}; "
+            f"color: {cfg['status_fg']}; "
+            f"font-size: 18px; font-weight: bold; "
+            f"border: 1px solid {c['border']}; border-radius: 6px; }}"
+        )
+
+    def _style_led(self, led: QFrame, color: str | None):
+        """Apply active (`color`) or inactive (None) styling to an LED.  The
+        inactive colors are theme-aware so dim LEDs read well on both themes."""
+        c = self._colors()
+        if color is None:
+            led.setStyleSheet(
+                f"QFrame {{ background-color: {c['led_inactive_bg']}; "
+                f"border: 1px solid {c['led_inactive_border']}; "
+                "border-radius: 9px; }"
+            )
+        else:
+            led.setStyleSheet(
+                f"QFrame {{ background-color: {color}; border: 1px solid {color}; "
+                f"border-radius: 9px; }}"
+            )
+
+    @staticmethod
+    def _make_led() -> QFrame:
+        """Small circular LED widget (inactive/dim by default).  Initial
+        style is dark; _apply_theme() re-styles it for the active palette."""
+        led = QFrame()
+        led.setFixedSize(18, 18)
+        led.setStyleSheet(
+            "QFrame { background-color: #2A2A31; border: 1px solid #3A3A3A; "
+            "border-radius: 9px; }"
+        )
+        return led
+
+    # ══════════════════════════════════════════════════════════════════════
     #  Console Logging
     # ══════════════════════════════════════════════════════════════════════
 
-    def _log_h7(self, prefix: str, text: str, color: str = "#C0C0C0"):
-        """Append a colored line to the H7 Console."""
+    def _log_h7(self, prefix: str, text: str, color: str | None = None):
+        """Append a colored line to the H7 Console.  `color` defaults to the
+        active theme's text color so newly written lines match the theme."""
+        c = self._colors()
+        text_color = color if color is not None else c['text']
         ts = time.strftime("%H:%M:%S")
         self._h7_console.append(
-            f"<span style='color:#D4AF37;'>[{ts}]</span> "
-            f"<span style='color:{color};'>{prefix} {text}</span>"
+            f"<span style='color:{c['accent_gold']};'>[{ts}]</span> "
+            f"<span style='color:{text_color};'>{prefix} {text}</span>"
         )
         self._h7_console.moveCursor(QTextCursor.End)
 
-    def _log_gui(self, prefix: str, text: str, color: str = "#8E8E93"):
-        """Append a colored line to the GUI Console."""
+    def _log_gui(self, prefix: str, text: str, color: str | None = None):
+        """Append a colored line to the GUI Console.  `color` defaults to the
+        active theme's muted-text color so newly written lines match the theme."""
+        c = self._colors()
+        text_color = color if color is not None else c['text_muted']
         ts = time.strftime("%H:%M:%S")
         self._gui_console.append(
-            f"<span style='color:#D4AF37;'>[{ts}]</span> "
-            f"<span style='color:{color};'>{prefix} {text}</span>"
+            f"<span style='color:{c['accent_gold']};'>[{ts}]</span> "
+            f"<span style='color:{text_color};'>{prefix} {text}</span>"
         )
         self._gui_console.moveCursor(QTextCursor.End)
 
     def _log_tx(self, cmd: str):
-        self._log_h7("[TX-H7]", cmd, "#FFD66B")
+        self._log_h7("[TX-H7]", cmd, self._colors()['accent_gold_bright'])
 
     def _log_rx(self, text: str):
-        self._log_h7("[RX-H7]", text, "#C0C0C0")
+        self._log_h7("[RX-H7]", text, self._colors()['text'])
 
     def _log_info(self, text: str):
-        self._log_gui("[GUI]", text, "#8E8E93")
+        self._log_gui("[GUI]", text, self._colors()['text_muted'])
 
     def _log_err(self, text: str):
-        self._log_gui("[GUI-ERROR]", text, "#B00020")
+        self._log_gui("[GUI-ERROR]", text, self._colors()['danger'])
 
     def _log_warn(self, text: str):
-        self._log_gui("[GUI-WARN]", text, "#C9831A")
+        self._log_gui("[GUI-WARN]", text, self._colors()['warning'])
 
     # ══════════════════════════════════════════════════════════════════════
     #  Serial Port Management
@@ -934,23 +1219,15 @@ class EarendilControlGui(QMainWindow):
             self.reader_thread.start()
 
             self._lbl_status.setText("● Connected")
-            self._lbl_status.setStyleSheet(
-                "color: #D4AF37; font-weight: bold;"
-            )
+            self._style_connection_status()
             self._btn_connect.setText("Disconnect")
-            self._btn_connect.setStyleSheet(
-                "QPushButton { background-color: #B00020; color: #C0C0C0; }"
-            )
+            self._style_connection_button()
             self._port_combo.setEnabled(False)
             self._baud_edit.setEnabled(False)
 
             self._log_info(f"Connected to {port} @ {baud}")
             self._lbl_qs_port.setText(f"Port: {port}")
-            self._lbl_qs_port.setStyleSheet(
-                "color: #D4AF37; font-weight: bold; "
-                "background-color: #0B0B0D; border: 1px solid #5F5A4A; "
-                "border-radius: 4px; padding: 4px 10px;"
-            )
+            self._lbl_qs_port.setStyleSheet(self._style_badge(self._colors()['accent_gold']))
         except Exception as e:
             self._log_err(f"Connect failed: {e}")
 
@@ -987,21 +1264,13 @@ class EarendilControlGui(QMainWindow):
         if self._pending_mode_timer.isActive():
             self._pending_mode_timer.stop()
         self._lbl_status.setText("● Disconnected")
-        self._lbl_status.setStyleSheet(
-            "color: #B00020; font-weight: bold;"
-        )
+        self._style_connection_status()
         self._btn_connect.setText("Connect")
-        self._btn_connect.setStyleSheet(
-            "QPushButton { background-color: #1e6e3e; color: #C0C0C0; }"
-        )
+        self._style_connection_button()
         self._port_combo.setEnabled(True)
         self._baud_edit.setEnabled(True)
         self._lbl_qs_port.setText("Port: Disconnected")
-        self._lbl_qs_port.setStyleSheet(
-            "color: #B00020; font-weight: bold; "
-            "background-color: #0B0B0D; border: 1px solid #5F5A4A; "
-            "border-radius: 4px; padding: 4px 10px;"
-        )
+        self._lbl_qs_port.setStyleSheet(self._style_badge(self._colors()['danger']))
 
     # ══════════════════════════════════════════════════════════════════════
     #  Serial Receive
@@ -1121,7 +1390,6 @@ class EarendilControlGui(QMainWindow):
         line was recognized as a mode-confirmation line.
         """
         m = _RE_OP_MODE_CONFIRM.search(line)
-        self._log_gui("[DBG]", f"mode-conv repr={line!r} match={bool(m)}", "#C9831A")
         if not m:
             return False
         mode_name = m.group(1)
@@ -1185,7 +1453,7 @@ class EarendilControlGui(QMainWindow):
             return
         self._h7_input.clear()
         if not self.connected:
-            self._log_h7("[TX-H7]", f"{text}  (not sent - not connected)", "#C9831A")
+            self._log_h7("[TX-H7]", f"{text}  (not sent - not connected)", self._colors()['warning'])
             self._log_warn("Cannot send to H7: serial port is not connected.")
         else:
             self._send_cmd(text)
@@ -1242,11 +1510,7 @@ class EarendilControlGui(QMainWindow):
 
         # Status box: background + text change with the operating mode.
         self._lbl_op_mode_status.setText(cfg["label"])
-        self._lbl_op_mode_status.setStyleSheet(
-            f"QLabel {{ background-color: {cfg['status_bg']}; color: {cfg['status_fg']}; "
-            f"font-size: 18px; font-weight: bold; "
-            f"border: 1px solid #5F5A4A; border-radius: 6px; }}"
-        )
+        self._style_operating_mode_status(cfg)
 
     def _set_mode(self, new_mode: str):
         if new_mode == self.mode:
@@ -1254,21 +1518,18 @@ class EarendilControlGui(QMainWindow):
         self.mode = new_mode
         self._lbl_mode.setText(new_mode)
         if new_mode == "RPM":
-            self._lbl_mode.setStyleSheet(
-                "color: #D4AF37; font-size: 16px; font-weight: bold;"
-            )
             self._lbl_value_label.setText("RPM Value:")
             self._lbl_value.setText(str(self.current_rpm))
             self._send_cmd("m speed")
         else:
-            self._lbl_mode.setStyleSheet(
-                "color: #FFD66B; font-size: 16px; font-weight: bold;"
-            )
             self._lbl_value_label.setText("Duty Value:")
             self._lbl_value.setText(str(self.current_pwm))
             self._send_cmd("m duty")
+        # Re-style the Mode + Value labels for the active theme + mode.
+        self._style_mode_value_labels()
         self._log_info(f"Mode changed to {new_mode}")
         self._lbl_qs_mode.setText(f"Mode: {new_mode}")
+        self._lbl_qs_mode.setStyleSheet(self._style_badge(self._colors()['accent_gold']))
 
     def _toggle_mode(self):
         self._set_mode("DUTY" if self.mode == "RPM" else "RPM")
@@ -1411,58 +1672,61 @@ class EarendilControlGui(QMainWindow):
     # ══════════════════════════════════════════════════════════════════════
 
     def _show_help_popup(self):
+        c = self._colors()
         dlg = QDialog(self)
         dlg.setWindowTitle("Earendil GUI Help")
         dlg.setMinimumWidth(520)
-        dlg.setStyleSheet("""
-            QDialog {
-                background-color: #17171C;
-                color: #C0C0C0;
+        dlg.setStyleSheet(f"""
+            QDialog {{
+                background-color: {c['bg_main']};
+                color: {c['text']};
                 font-size: 13px;
-            }
-            QLabel {
-                color: #C0C0C0;
-            }
-            QPushButton {
-                background-color: #2A2A31;
-                border: 1px solid #D4AF37;
+            }}
+            QLabel {{
+                color: {c['text']};
+            }}
+            QPushButton {{
+                background-color: {c['bg_input']};
+                border: 1px solid {c['accent_gold']};
                 border-radius: 6px;
                 padding: 8px 24px;
-                color: #D4AF37;
+                color: {c['accent_gold']};
                 font-weight: bold;
                 min-height: 28px;
-            }
-            QPushButton:hover {
-                background-color: #3A3320;
-            }
+            }}
+            QPushButton:hover {{
+                background-color: {c['selection_bg']};
+            }}
         """)
 
         layout = QVBoxLayout(dlg)
         layout.setSpacing(12)
 
         title = QLabel("Earendil — Rover Control GUI Help")
-        title.setStyleSheet("font-size: 18px; font-weight: bold; color: #D4AF37;")
+        title.setStyleSheet(
+            f"font-size: 18px; font-weight: bold; color: {c['accent_gold']};"
+        )
         title.setAlignment(Qt.AlignCenter)
         layout.addWidget(title)
 
         line = QFrame()
         line.setFrameShape(QFrame.HLine)
-        line.setStyleSheet("color: #5F5A4A;")
+        line.setStyleSheet(f"color: {c['border']};")
         layout.addWidget(line)
 
         keys_html = (
-            "<table style='font-size:13px; color:#C0C0C0;' cellspacing='8'>"
-            "<tr><td style='color:#FFD66B;'><b>W</b></td><td>Forward</td>"
-            "<td style='color:#FFD66B;'><b>Space</b></td><td>Stop</td></tr>"
-            "<tr><td style='color:#FFD66B;'><b>S</b></td><td>Backward</td>"
-            "<td style='color:#FFD66B;'><b>X</b></td><td>Brake</td></tr>"
-            "<tr><td style='color:#FFD66B;'><b>A</b></td><td>Left</td>"
-            "<td style='color:#FFD66B;'><b>M</b></td><td>Toggle RPM/DUTY</td></tr>"
-            "<tr><td style='color:#FFD66B;'><b>D</b></td><td>Right</td>"
-            "<td style='color:#FFD66B;'><b>I</b></td><td>Identify</td></tr>"
-            "<tr><td style='color:#FFD66B;'><b>LShift</b></td><td>Value +5</td>"
-            "<td style='color:#FFD66B;'><b>LCtrl</b></td><td>Value -5</td></tr>"
-            "</table>"
+            f"<table style='font-size:13px; color:{c['text']};' cellspacing='8'>"
+            f"<tr><td style='color:{c['accent_gold_bright']};'><b>W</b></td><td>Forward</td>"
+            f"<td style='color:{c['accent_gold_bright']};'><b>Space</b></td><td>Stop</td></tr>"
+            f"<tr><td style='color:{c['accent_gold_bright']};'><b>S</b></td><td>Backward</td>"
+            f"<td style='color:{c['accent_gold_bright']};'><b>X</b></td><td>Brake</td></tr>"
+            f"<tr><td style='color:{c['accent_gold_bright']};'><b>A</b></td><td>Left</td>"
+            f"<td style='color:{c['accent_gold_bright']};'><b>M</b></td><td>Toggle RPM/DUTY</td></tr>"
+            f"<tr><td style='color:{c['accent_gold_bright']};'><b>D</b></td><td>Right</td>"
+            f"<td style='color:{c['accent_gold_bright']};'><b>I</b></td><td>Identify</td></tr>"
+            f"<tr><td style='color:{c['accent_gold_bright']};'><b>LShift</b></td><td>Value +5</td>"
+            f"<td style='color:{c['accent_gold_bright']};'><b>LCtrl</b></td><td>Value -5</td></tr>"
+            f"</table>"
         )
         keys_label = QLabel(keys_html)
         keys_label.setTextFormat(Qt.RichText)
@@ -1470,18 +1734,18 @@ class EarendilControlGui(QMainWindow):
 
         line2 = QFrame()
         line2.setFrameShape(QFrame.HLine)
-        line2.setStyleSheet("color: #5F5A4A;")
+        line2.setStyleSheet(f"color: {c['border']};")
         layout.addWidget(line2)
 
         mode_html = (
-            "<table style='font-size:13px; color:#C0C0C0;' cellspacing='4'>"
-            "<tr><td style='color:#D4AF37;'><b>RPM mode:</b></td>"
-            "<td>W/S/A/D sends f/b/l/r&lt;number&gt;  (cmd: m speed)</td></tr>"
-            "<tr><td style='color:#D4AF37;'><b>DUTY mode:</b></td>"
-            "<td>W/S/A/D sends fd/bd/ld/rd&lt;number&gt;  (cmd: m duty)</td></tr>"
-            "</table>"
-            "<br>"
-            "<span style='color:#8E8E93;'>Held key repeats every 500 ms</span>"
+            f"<table style='font-size:13px; color:{c['text']};' cellspacing='4'>"
+            f"<tr><td style='color:{c['accent_gold']};'><b>RPM mode:</b></td>"
+            f"<td>W/S/A/D sends f/b/l/r&lt;number&gt;  (cmd: m speed)</td></tr>"
+            f"<tr><td style='color:{c['accent_gold']};'><b>DUTY mode:</b></td>"
+            f"<td>W/S/A/D sends fd/bd/ld/rd&lt;number&gt;  (cmd: m duty)</td></tr>"
+            f"</table>"
+            f"<br>"
+            f"<span style='color:{c['text_muted']};'>Held key repeats every 500 ms</span>"
         )
         mode_label = QLabel(mode_html)
         mode_label.setTextFormat(Qt.RichText)
@@ -1489,16 +1753,16 @@ class EarendilControlGui(QMainWindow):
 
         line3 = QFrame()
         line3.setFrameShape(QFrame.HLine)
-        line3.setStyleSheet("color: #5F5A4A;")
+        line3.setStyleSheet(f"color: {c['border']};")
         layout.addWidget(line3)
 
         console_html = (
-            "<table style='font-size:13px; color:#C0C0C0;' cellspacing='4'>"
-            "<tr><td style='color:#D4AF37;'><b>H7 Console:</b></td>"
-            "<td>Shows serial TX/RX with the STM32H723</td></tr>"
-            "<tr><td style='color:#8E8E93;'><b>GUI Console:</b></td>"
-            "<td>Shows GUI-local messages, warnings, and errors</td></tr>"
-            "</table>"
+            f"<table style='font-size:13px; color:{c['text']};' cellspacing='4'>"
+            f"<tr><td style='color:{c['accent_gold']};'><b>H7 Console:</b></td>"
+            f"<td>Shows serial TX/RX with the STM32H723</td></tr>"
+            f"<tr><td style='color:{c['text_muted']};'><b>GUI Console:</b></td>"
+            f"<td>Shows GUI-local messages, warnings, and errors</td></tr>"
+            f"</table>"
         )
         console_label = QLabel(console_html)
         console_label.setTextFormat(Qt.RichText)

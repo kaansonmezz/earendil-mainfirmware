@@ -22,6 +22,13 @@ void MotorTxDma_OnTxError(UART_HandleTypeDef *huart);
 
 bool MotorTxDma_IsBusy(MotorId_t motor);
 bool MotorTxDma_HasPending(MotorId_t motor);
+
+/* True when no motor TX channel is busy and none has a pending frame queued,
+ * i.e. all motor UART TX paths are fully drained.  Used by the synchronized
+ * control-mode switch to guarantee the previous frame (e.g. "stop") has been
+ * fully clocked out before the next frame (e.g. "mode speed") is sent. */
+bool MotorTxDma_AllIdle(void);
+
 void MotorTxDma_CancelPending(void);  /* drop all queued (non-active) TX frames */
 
 #endif /* MOTOR_TX_DMA_H */
