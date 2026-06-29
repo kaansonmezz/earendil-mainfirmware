@@ -1,4 +1,0 @@
-../Core/Src/logger.c:14:6:Logger_Init	1
-../Core/Src/logger.c:19:6:Logger_Log	2
-../Core/Src/logger.c:38:6:Logger_LogMotorCmd	1
-../Core/Src/logger.c:45:6:Logger_LogAck	1

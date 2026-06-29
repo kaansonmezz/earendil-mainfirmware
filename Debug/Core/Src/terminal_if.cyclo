@@ -1,6 +1,0 @@
-../Core/Src/terminal_if.c:13:6:TerminalIf_Init	1
-../Core/Src/terminal_if.c:23:6:TerminalIf_Process	1
-../Core/Src/terminal_if.c:29:9:TerminalIf_RxCallback	5
-../Core/Src/terminal_if.c:51:6:TerminalIf_LineReady	1
-../Core/Src/terminal_if.c:56:13:TerminalIf_GetLine	1
-../Core/Src/terminal_if.c:62:6:HAL_UART_RxCpltCallback	2

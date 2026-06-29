@@ -208,6 +208,17 @@ _RE_UART_RECOVERED = re.compile(
     r"^\[INFO\]\s+(USART2|UART4|UART5|UART7)\s+RX recovered after UART error$"
 )
 
+# ── F411 motor telemetry patterns ──────────────────────────────────────────
+#   New H7 format:  [TEL][FL] RPM:60,T:0,...
+#   Legacy format:  [INFO] [USART2_RX] RPM:60,T:0,...
+# Both may have a leading [INFO] prefix from the H7 logger.
+_RE_MOTOR_TEL_TAGGED = re.compile(
+    r"(?:\[INFO\]\s*)?\[TEL\]\[(FL|FR|RL|RR)\]\s+(RPM:.*)$"
+)
+_RE_MOTOR_TEL_UART = re.compile(
+    r"(?:\[INFO\]\s*)?\[(USART2_RX|UART4_RX|UART5_RX|UART7_RX)\]\s+(RPM:.*)$"
+)
+
 # ── Operating mode confirmation from H7 firmware (command_handler.c) ──────
 #   The firmware logger (logger.c) prepends a level tag to every line, so
 #   the actual serial output looks like:
@@ -802,6 +813,46 @@ class EarendilControlGui(QMainWindow):
     # Recognized UART error code prefixes (HAL UART error flags)
     UART_ERROR_CODES = {"FE", "NE", "ORE", "PE", "DMA", "RTO"}
 
+    # ── Motor table column indices ─────────────────────────────────────────
+    MOTOR_COL = {
+        "motor": 0,
+        "current_rpm": 1,
+        "target_rpm": 2,
+        "drive_duty": 3,
+        "direction": 4,
+        "motor_state": 5,
+        "control_mode": 6,
+        "brake_status": 7,
+        "fault_code": 8,
+        "hall_sensor": 9,
+        "target_pwm": 10,
+        "applied_pwm": 11,
+        "dropped_commands": 12,
+        "received_uart_bytes": 13,
+        "error": 14,
+        "link": 15,
+    }
+    MOTOR_COL_HEADERS = [
+        "Motor", "Current RPM", "Target RPM", "Drive Duty",
+        "Direction", "Motor State", "Control Mode", "Brake Status",
+        "Fault Code", "Hall Sensor", "Target PWM", "Applied PWM",
+        "Dropped Commands", "Received UART Bytes", "Error", "Link",
+    ]
+
+    # UART RX suffix -> motor tag (for legacy [USART2_RX] format)
+    UART_RX_TO_MOTOR = {
+        "USART2_RX": "FL",
+        "UART4_RX":  "FR",
+        "UART7_RX":  "RL",
+        "UART5_RX":  "RR",
+    }
+
+    # F411 telemetry display translations
+    _APP_PH_MAP = {"0": "Stopped", "1": "Running", "2": "Brake", "3": "Idle", "4": "Error"}
+    _DIR_MAP = {"F": "Forward", "R": "Reverse", "N": "Neutral / No Direction"}
+    _SP_MAP = {"0": "Duty/PWM Mode", "1": "RPM Control Mode"}
+    _BRAKE_MAP = {"0": "Brake Off", "1": "Brake Active"}
+
     # ── Operating mode (DISARM / MANUAL / AUTONOMOUS) ─────────────────────
     #   drive/control mode (RPM/DUTY) is a separate concept handled by _set_mode.
     #   Commands are sent over the same H7 terminal serial path as other cmds.
@@ -868,10 +919,16 @@ class EarendilControlGui(QMainWindow):
         self._keys_held: set[str] = set()          # ALL held keys (prevents duplicates)
 
         # ── Motor UART error tracking ─────────────────────────────────────
-        # motor -> current text shown in the Error column (col 4)
-        self._motor_error_text: dict[str, str] = {"FL": "", "FR": "", "RL": "", "RR": ""}
+        # motor -> current UART error text (empty string = no active UART error)
+        self._motor_uart_error_text: dict[str, str] = {"FL": "", "FR": "", "RL": "", "RR": ""}
         # uart -> decoded error parts accumulated within one report cycle
         self._uart_report_decoded: dict[str, list[str]] = {}
+        # motor -> F411 fault code string ("0" = no fault)
+        self._motor_fault_code: dict[str, str] = {"FL": "0", "FR": "0", "RL": "0", "RR": "0"}
+        # motor -> last telemetry values dict (key -> display string)
+        self._motor_telemetry: dict[str, dict[str, str]] = {
+            m: {} for m in ("FL", "FR", "RL", "RR")
+        }
 
         # ── Build UI ───────────────────────────────────────────────────────
         self._central = LogoBackgroundWidget("earendil_logo.png", opacity=1.0)
@@ -1129,24 +1186,26 @@ class EarendilControlGui(QMainWindow):
         grp = QGroupBox("Motor State")
         lay = QVBoxLayout(grp)
 
-        self._motor_table = QTableWidget(4, 7)
-        self._motor_table.setHorizontalHeaderLabels(
-            ["Motor", "Mode", "PWM", "RPM", "Error", "Link", "Last RX"]
-        )
+        num_cols = len(self.MOTOR_COL_HEADERS)
+        self._motor_table = QTableWidget(4, num_cols)
+        self._motor_table.setHorizontalHeaderLabels(self.MOTOR_COL_HEADERS)
         headers = self._motor_table.horizontalHeader()
         if headers:
-            headers.setSectionResizeMode(QHeaderView.Stretch)
+            headers.setSectionResizeMode(QHeaderView.ResizeToContents)
+            headers.setSectionResizeMode(self.MOTOR_COL["motor"], QHeaderView.Stretch)
+            headers.setSectionResizeMode(self.MOTOR_COL["error"], QHeaderView.Stretch)
 
         motors = ["FL", "FR", "RL", "RR"]
         for row, name in enumerate(motors):
             self._motor_table.setItem(row, 0, QTableWidgetItem(name))
-            for col in range(1, 7):
+            for col in range(1, num_cols):
                 self._motor_table.setItem(row, col, QTableWidgetItem("--"))
 
         self._motor_table.setVerticalHeaderLabels([])
         self._motor_table.setEditTriggers(QTableWidget.NoEditTriggers)
         self._motor_table.setFocusPolicy(Qt.NoFocus)
-        self._motor_table.setMaximumHeight(160)
+        self._motor_table.setMaximumHeight(200)
+        self._motor_table.setMinimumHeight(160)
         lay.addWidget(self._motor_table)
 
         # ── Settings button (opens F411 Motor Tuning Settings dialog) ─────
@@ -1676,25 +1735,28 @@ class EarendilControlGui(QMainWindow):
 
     def _on_rx_line(self, line: str):
         self._log_rx(line)
-        self._parse_rx_for_motor_state(line)
+        if self._parse_motor_telemetry_line(line):
+            pass  # telemetry handled
+        else:
+            self._parse_rx_for_motor_state(line)
         self._parse_uart_error_line(line)
         self._parse_operating_mode_confirm(line)
 
     def _parse_rx_for_motor_state(self, line: str):
-        """Minimal parsing: update Link column if link-lost/recovered detected."""
+        """Update Link column if link-lost/recovered detected."""
         lower = line.lower()
-        motor_map = {"fl": 0, "fr": 1, "rl": 2, "rr": 3}
-        for tag, row in motor_map.items():
-            if f"link_lost][{tag}" in lower or f"link lost.*{tag}" in lower:
-                item = self._motor_table.item(row, 5)
+        link_col = self.MOTOR_COL["link"]
+        for tag, row in self.MOTOR_ROW.items():
+            if f"link_lost][{tag}" in lower:
+                item = self._motor_table.item(row, link_col)
                 if item:
                     item.setText("LOST")
-                    item.setForeground(QColor("#B00020"))
+                    item.setForeground(QColor(self._colors()["danger"]))
             if f"link_recovered][{tag}" in lower:
-                item = self._motor_table.item(row, 5)
+                item = self._motor_table.item(row, link_col)
                 if item:
                     item.setText("OK")
-                    item.setForeground(QColor("#D4AF37"))
+                    item.setForeground(QColor(self._colors()["success_bright"]))
 
     # ── UART error / recovery parsing ───────────────────────────────────────
     #
@@ -1706,15 +1768,39 @@ class EarendilControlGui(QMainWindow):
     # using the firmware's UART→motor mapping.
 
     def _set_motor_error(self, motor: str, text: str, is_error: bool):
-        """Write `text` into the Error column (col 4) of the motor row."""
+        """Write `text` into the UART error state and re-render the Error column."""
         row = self.MOTOR_ROW.get(motor)
         if row is None:
             return
-        self._motor_error_text[motor] = text
-        item = self._motor_table.item(row, 4)
-        if item is not None:
-            item.setText(text)
-            item.setForeground(QColor("#B00020") if is_error else QColor("#D4AF37"))
+        self._motor_uart_error_text[motor] = text if is_error else ""
+        self._render_motor_error(motor)
+
+    def _render_motor_error(self, motor: str):
+        """Render the Error column from UART error + F411 fault code state.
+
+        Priority: UART error > F411 fault code > No Error.
+        """
+        row = self.MOTOR_ROW.get(motor)
+        if row is None:
+            return
+        c = self._colors()
+        col = self.MOTOR_COL["error"]
+        item = self._motor_table.item(row, col)
+        if item is None:
+            return
+
+        uart_err = self._motor_uart_error_text.get(motor, "")
+        fc = self._motor_fault_code.get(motor, "0")
+
+        if uart_err:
+            item.setText(uart_err)
+            item.setForeground(QColor(c["danger"]))
+        elif fc != "0":
+            item.setText(f"Fault Code: {fc}")
+            item.setForeground(QColor(c["danger"]))
+        else:
+            item.setText("No Error")
+            item.setForeground(QColor(c["success_bright"]))
 
     def _parse_uart_error_line(self, line: str) -> bool:
         """Detect H7 UART error/recovery log lines and update the motor table.
@@ -1750,17 +1836,148 @@ class EarendilControlGui(QMainWindow):
                     self._set_motor_error(motor, ", ".join(buf), is_error=True)
             return True
 
-        # RX recovered after a previous UART error → clear the Error column.
+        # RX recovered after a previous UART error → clear UART error state.
         m = _RE_UART_RECOVERED.match(line)
         if m:
             uart = m.group(1)
             motor = self.UART_TO_MOTOR.get(uart)
             if motor is not None:
                 self._uart_report_decoded.pop(uart, None)
-                self._set_motor_error(motor, "OK", is_error=False)
+                self._set_motor_error(motor, "", is_error=False)
             return True
 
         return False
+
+    # ── F411 Motor telemetry parsing ──────────────────────────────────────
+
+    def _parse_motor_telemetry_line(self, line: str) -> bool:
+        """Detect and parse F411 telemetry from [TEL][MOTOR] or legacy [UART_RX].
+
+        Returns True if the line was recognized as telemetry.
+        """
+        motor = None
+        payload = None
+
+        m = _RE_MOTOR_TEL_TAGGED.match(line)
+        if m:
+            motor = m.group(1)
+            payload = m.group(2)
+        else:
+            m = _RE_MOTOR_TEL_UART.match(line)
+            if m:
+                uart_tag = m.group(1)
+                motor = self.UART_RX_TO_MOTOR.get(uart_tag)
+                payload = m.group(2)
+
+        if motor is None or payload is None:
+            return False
+
+        tel = self._parse_telemetry_payload(payload)
+        if not tel:
+            return False
+
+        self._update_motor_telemetry(motor, tel)
+        return True
+
+    @staticmethod
+    def _parse_telemetry_payload(payload: str) -> dict[str, str]:
+        """Parse 'RPM:60,T:0,D:0,...' into {'RPM': '60', 'T': '0', ...}."""
+        result = {}
+        for token in payload.split(","):
+            if ":" not in token:
+                continue
+            key, val = token.split(":", 1)
+            result[key.strip()] = val.strip()
+        return result
+
+    def _update_motor_telemetry(self, motor: str, tel: dict[str, str]):
+        """Write parsed telemetry values into the motor table row."""
+        row = self.MOTOR_ROW.get(motor)
+        if row is None:
+            return
+
+        c = self._colors()
+        col = self.MOTOR_COL
+        tbl = self._motor_table
+        stored = self._motor_telemetry[motor]
+
+        # Merge new values into stored dict
+        for k, v in tel.items():
+            stored[k] = v
+
+        # Helper to set a cell
+        def _set(col_name: str, text: str, color: str | None = None):
+            item = tbl.item(row, col[col_name])
+            if item is not None:
+                item.setText(text)
+                if color:
+                    item.setForeground(QColor(color))
+
+        # Direct mappings
+        _set("current_rpm", tel.get("RPM", stored.get("RPM", "--")))
+        _set("target_rpm", tel.get("T", stored.get("T", "--")))
+        _set("drive_duty", tel.get("D", stored.get("D", "--")))
+        _set("hall_sensor", tel.get("H", stored.get("H", "--")))
+        _set("target_pwm", tel.get("PWM_SET", stored.get("PWM_SET", "--")))
+        _set("applied_pwm", tel.get("PWM_ACT", stored.get("PWM_ACT", "--")))
+        _set("dropped_commands", tel.get("QDROP", stored.get("QDROP", "--")))
+        _set("received_uart_bytes", tel.get("RXB", stored.get("RXB", "--")))
+
+        # Translated fields
+        dir_val = tel.get("DIR", stored.get("DIR", "--"))
+        _set("direction", self._translate_direction(dir_val))
+
+        app_ph = tel.get("APP_PH", stored.get("APP_PH", "--"))
+        ms_text = self._translate_app_phase(app_ph)
+        ms_color = None
+        if ms_text == "Error":
+            ms_color = c["danger"]
+        elif ms_text == "Brake":
+            ms_color = c["warning"]
+        _set("motor_state", ms_text, ms_color)
+
+        sp = tel.get("SP", stored.get("SP", "--"))
+        _set("control_mode", self._translate_speed_mode(sp))
+
+        brk = tel.get("BRAKE", stored.get("BRAKE", "--"))
+        brk_text = self._translate_brake(brk)
+        brk_color = c["danger"] if brk_text == "Brake Active" else None
+        _set("brake_status", brk_text, brk_color)
+
+        # Fault code
+        fc = tel.get("FC", stored.get("FC", "0"))
+        self._motor_fault_code[motor] = fc
+        fc_item = tbl.item(row, col["fault_code"])
+        if fc_item is not None:
+            if fc == "0":
+                fc_item.setText("No Error")
+                fc_item.setForeground(QColor(c["success_bright"]))
+            else:
+                fc_item.setText(f"Fault Code: {fc}")
+                fc_item.setForeground(QColor(c["danger"]))
+
+        # Re-render Error column (UART error has priority over FC)
+        self._render_motor_error(motor)
+
+        # Link -> OK when telemetry received
+        link_item = tbl.item(row, col["link"])
+        if link_item is not None:
+            link_item.setText("OK")
+            link_item.setForeground(QColor(c["success_bright"]))
+
+    # ── Telemetry value translators ────────────────────────────────────────
+
+    def _translate_app_phase(self, value: str) -> str:
+        return self._APP_PH_MAP.get(value, f"Unknown ({value})")
+
+    def _translate_direction(self, value: str) -> str:
+        return self._DIR_MAP.get(value, f"Unknown ({value})")
+
+    def _translate_speed_mode(self, value: str) -> str:
+        return self._SP_MAP.get(value, f"Unknown ({value})")
+
+    def _translate_brake(self, value: str) -> str:
+        return self._BRAKE_MAP.get(value, f"Unknown ({value})")
 
     # ── Operating-mode confirmation parsing ─────────────────────────────────
     #

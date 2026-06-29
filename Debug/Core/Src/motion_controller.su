@@ -1,7 +1,0 @@
-../Core/Src/motion_controller.c:8:13:SetMotor	16	static
-../Core/Src/motion_controller.c:14:13:SetAllMotors	24	static
-../Core/Src/motion_controller.c:20:13:SetMotorCmd	16	static
-../Core/Src/motion_controller.c:26:6:MotionController_Init	8	static
-../Core/Src/motion_controller.c:31:6:MotionController_Execute	24	static
-../Core/Src/motion_controller.c:72:6:MotionController_Stop	8	static
-../Core/Src/motion_controller.c:79:6:MotionController_DisarmSafe	8	static

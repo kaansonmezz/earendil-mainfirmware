@@ -1,4 +1,0 @@
-../Core/Src/control_mode.c:8:6:ControlMode_Init	1
-../Core/Src/control_mode.c:13:6:ControlMode_Set	1
-../Core/Src/control_mode.c:18:15:ControlMode_Get	1
-../Core/Src/control_mode.c:23:13:ControlMode_ToString	2

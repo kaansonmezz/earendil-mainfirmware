@@ -26,6 +26,10 @@ static MotorRxSlot_t rxSlot[NUM_MOTOR_UARTS];
 
 static const char *slotLabel[] = { "USART2_RX", "UART4_RX", "UART5_RX", "UART7_RX" };
 
+/* Motor tag for each RX slot (same ordering as slotLabel / LookupSlot).
+ *  USART2=FL, UART4=FR, UART5=RR, UART7=RL                          */
+static const char *slotMotorTag[] = { "FL", "FR", "RR", "RL" };
+
 /* ── Per-UART error diagnostic state ────────────────────────────────────── */
 typedef struct
 {
@@ -234,7 +238,21 @@ void MotorUartDma_Update(void)
         if (rxSlot[i].ready)
         {
             rxSlot[i].ready = false;
-            Logger_Log(LOG_INFO, "[%s] %s", slotLabel[i], rxSlot[i].msg);
+            const char *line = (const char *)rxSlot[i].msg;
+
+            /* Detect compact F411 telemetry (contains RPM:, PWM_ACT:, RXB:).
+             * If matched, re-log with [TEL][MOTOR] tag so the GUI can parse
+             * it unambiguously. */
+            if (strstr(line, "RPM:") != NULL &&
+                strstr(line, "PWM_ACT:") != NULL &&
+                strstr(line, "RXB:") != NULL)
+            {
+                Logger_Log(LOG_INFO, "[TEL][%s] %s", slotMotorTag[i], line);
+            }
+            else
+            {
+                Logger_Log(LOG_INFO, "[%s] %s", slotLabel[i], line);
+            }
         }
     }
 }
