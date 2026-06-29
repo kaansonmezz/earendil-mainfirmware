@@ -7,6 +7,34 @@
  * Matches MAX_LINE_LEN so any trimmed terminal line fits. */
 #define RAW_PAYLOAD_MAX 61
 
+/* Max length of a normalised tune payload forwarded to F411.
+ * e.g. "base 40 40 45 45 50 50 55 55" = 35 chars + NUL. */
+#define TUNE_PAYLOAD_MAX 56
+
+/* ── Motor target for tune commands ──────────────────────────────────────── */
+typedef enum
+{
+    TUNE_MOTOR_NONE = 0,
+    TUNE_MOTOR_FL,
+    TUNE_MOTOR_FR,
+    TUNE_MOTOR_RL,
+    TUNE_MOTOR_RR,
+    TUNE_MOTOR_ALL
+} TuneMotorTarget_t;
+
+/* ── Tune command kind ───────────────────────────────────────────────────── */
+typedef enum
+{
+    TUNE_KIND_NONE = 0,
+    TUNE_KIND_BASE,       /* base P1..P8                    -> "base P1..P8"           */
+    TUNE_KIND_BOOST,      /* boost P1..P8 MS                -> "boost P1..P8 MS"       */
+    TUNE_KIND_KICKDUTY,   /* kickduty / kick duty VALUE     -> "kickduty VALUE"         */
+    TUNE_KIND_KICKMS,     /* kickms   / kick ms VALUE       -> "kickms VALUE"           */
+    TUNE_KIND_RAMP,       /* ramp UP DOWN                   -> "ramp UP DOWN"           */
+    TUNE_KIND_PI,         /* pi KP KI                       -> "pi KP KI"              */
+    TUNE_KIND_TELPER      /* telper MS                      -> "telper MS"             */
+} TuneCmdKind_t;
+
 /* ── Parsed command type ─────────────────────────────────────────────────── */
 typedef enum
 {
@@ -21,7 +49,8 @@ typedef enum
     TCMD_MODE_QUERY,    /* mode (print current rover mode) */
     TCMD_OP_MODE,       /* mode disarm / mode manual / mode auto / mode autonomous */
     TCMD_MOTION,        /* f/b/r/l/fd/bd/rd/ld + value */
-    TCMD_MOTOR_RAW      /* FL/FR/RL/RR <text> : raw text to one motor only */
+    TCMD_MOTOR_RAW,     /* FL/FR/RL/RR <text> : raw text to one motor only */
+    TCMD_MOTOR_TUNE     /* FL/FR/RL/RR/ALL <tuning command> : validated tuning */
 } TerminalCommandType_t;
 
 /* ── Parse result ────────────────────────────────────────────────────────── */
@@ -42,6 +71,16 @@ typedef struct
      * includes the "XX " prefix nor any trailing CR/LF. */
     MotorId_t     rawMotor;
     char          rawPayload[RAW_PAYLOAD_MAX];
+
+    /* TCMD_MOTOR_TUNE: validated tuning command fields.
+     * tuneTarget — which motor(s) to target (FL/FR/RL/RR/ALL).
+     * tuneKind   — which tuning command (base/boost/kickduty/…).
+     * tunePayload — normalised string to forward to F411 UART,
+     *               e.g. "base 40 40 45 45 50 50 55 55".
+     *               Does NOT include "\r\n" — the dispatcher adds it. */
+    TuneMotorTarget_t tuneTarget;
+    TuneCmdKind_t     tuneKind;
+    char              tunePayload[TUNE_PAYLOAD_MAX];
 } TerminalCommand_t;
 
 /* ── Public API ─────────────────────────────────────────────────────────── */

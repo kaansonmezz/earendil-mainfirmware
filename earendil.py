@@ -33,6 +33,7 @@ try:
         QLabel, QPushButton, QComboBox, QLineEdit,
         QGroupBox, QTextEdit, QTableWidget, QTableWidgetItem,
         QDialog, QHeaderView, QSplitter, QFrame, QSizePolicy,
+        QFormLayout, QSpinBox, QDoubleSpinBox, QGridLayout,
     )
     from PySide6.QtCore import Qt, QTimer, Signal, QObject, QThread, QEvent
     from PySide6.QtGui import (
@@ -217,6 +218,375 @@ _RE_UART_RECOVERED = re.compile(
 _RE_OP_MODE_CONFIRM = re.compile(
     r"\[MODE\]\s+(DISARM|MANUAL|AUTONOMOUS)\s+active\b"
 )
+
+
+# ════════════════════════════════════════════════════════════════════════════
+#  F411 Motor Tuning Settings Dialog
+#  Placeholder / planning UI for configuring F411 motor parameters from the GUI.
+#  Commands are built by the main window's centralized placeholder builder
+#  (EarendilControlGui.build_f411_tuning_commands) and routed through the
+#  existing _send_cmd() serial path, so logging / disconnected handling stay
+#  consistent with the rest of the GUI.  Nothing here assumes the final H7/F411
+#  raw motor forwarding protocol is complete — the format lives in one place:
+#  build_f411_tuning_commands().
+# ════════════════════════════════════════════════════════════════════════════
+
+class MotorSettingsDialog(QDialog):
+    """F411 Motor Tuning Settings dialog.
+
+    Opened from the Motor State section's *Settings* button.  This is a
+    placeholder / planning UI: the operator tweaks 8 slots of Base PWM /
+    Boost PWM / Boost MS, Ramp Up/Down, Kp/Ki, Telemetry period, and an
+    optional custom command, then clicks one of the per-motor send buttons.
+
+    Commands are NOT hardcoded in callbacks: collect_f411_tuning_settings()
+    reads the form, EarendilControlGui.build_f411_tuning_commands() builds
+    the placeholder protocol lines, and send_f411_tuning_command() routes
+    them through the existing _send_cmd() serial path.  Update those
+    centralized functions when the real H7 raw motor forwarding protocol
+    and F411 firmware parser are finalized.
+    """
+
+    NUM_SLOTS = 8
+    MOTOR_TAGS = ("FL", "FR", "RL", "RR")
+
+    def __init__(self, main_gui: "EarendilControlGui", parent=None):
+        super().__init__(parent)
+        self._gui = main_gui
+        self.setWindowTitle("F411 Motor Tuning Settings")
+        # Wider than the previous dialog so the 8-row tuning table reads well.
+        self.setMinimumWidth(560)
+        self._apply_theme_style()
+
+        root = QVBoxLayout(self)
+        root.setSpacing(10)
+        root.setContentsMargins(12, 12, 12, 12)
+
+        # ── 8-row tuning table: # | Base PWM | Boost PWM ─────────────
+        # Note: Boost MS is a single global field (in the form below), NOT
+        # one per slot.  See the layout comment in _build_form_group().
+        root.addWidget(self._build_tuning_table_group())
+
+        # ── Global settings: Boost MS / Kick Duty / Kick MS / Ramp /
+        #     PI / Telemetry ───────────────────────────────────────────
+        root.addWidget(self._build_form_group())
+
+        # ── Optional custom command ────────────────────────────────────
+        root.addWidget(self._build_custom_group())
+
+        # ── Send buttons (per-motor direct send + All) ────────────────
+        root.addLayout(self._build_send_row())
+
+        # ── Read buttons (placeholder) ───────────────────────────────
+        root.addLayout(self._build_read_row())
+
+        # ── Reset / Close ──────────────────────────────────────────────
+        root.addLayout(self._build_utility_row())
+
+        # Default values used by Reset Fields and dialog initialisation.
+        self._defaults = {
+            "base":      ["300", "500", "800", "1200", "1700", "2200", "2800", "3500"],
+            "boost":     ["1300", "1600", "1700", "2000", "2600", "3200", "3800", "4000"],
+            "boostms":   "150",
+            "kick_duty": "960",
+            "kick_ms":   "50",
+            "ramp_up":   "150",
+            "ramp_down": "150",
+            "kp":        "10",
+            "ki":        "10",
+            "telper":    "1",
+            "custom":    "",
+        }
+        self._reset_fields(log=False)
+
+    # ══════════════════════════════════════════════════════════════════════
+    #  UI builders
+    # ══════════════════════════════════════════════════════════════════════
+
+    def _build_tuning_table_group(self) -> QGroupBox:
+        """Horizontal tuning table: slots 1-8 left-to-right.
+
+        Layout (3 rows × 9 columns):
+
+            Slot:        1      2      3    ...    8
+            Base PWM:  [  ]   [  ]   [  ]  ...  [  ]
+            Boost PWM: [  ]   [  ]   [  ]  ...  [  ]
+
+        Boost MS / Kick Duty / Kick MS are NOT here — they are single
+        global fields in _build_form_group().
+        """
+        grp = QGroupBox("Tuning Slots")
+        lay = QGridLayout(grp)
+        lay.setSpacing(6)
+        lay.setContentsMargins(10, 14, 10, 10)
+
+        # Row 0 — "Slot:" label + slot numbers 1..8
+        lay.addWidget(QLabel("Slot:"), 0, 0)
+        for i in range(self.NUM_SLOTS):
+            lbl = QLabel(str(i + 1))
+            lbl.setAlignment(Qt.AlignCenter)
+            lay.addWidget(lbl, 0, i + 1)
+
+        # Row 1 — "Base PWM:" label + 8 input fields
+        lay.addWidget(QLabel("Base PWM:"), 1, 0)
+        self._base_edits = []
+        for i in range(self.NUM_SLOTS):
+            edit = QLineEdit()
+            edit.setPlaceholderText("0")
+            edit.setFixedWidth(60)
+            edit.setAlignment(Qt.AlignCenter)
+            lay.addWidget(edit, 1, i + 1)
+            self._base_edits.append(edit)
+
+        # Row 2 — "Boost PWM:" label + 8 input fields
+        lay.addWidget(QLabel("Boost PWM:"), 2, 0)
+        self._boost_edits = []
+        for i in range(self.NUM_SLOTS):
+            edit = QLineEdit()
+            edit.setPlaceholderText("0")
+            edit.setFixedWidth(60)
+            edit.setAlignment(Qt.AlignCenter)
+            lay.addWidget(edit, 2, i + 1)
+            self._boost_edits.append(edit)
+
+        return grp
+
+    def _build_form_group(self) -> QGroupBox:
+        """Global tuning form fields.
+
+        Single Boost MS field (shared across all slots), Kick Duty, Kick MS,
+        Ramp Up / Ramp Down, Kp / Ki, Telemetry Period — all QLineEdit only
+        (no spinbox arrows).  Values are raw text so the placeholder builder
+        can later emit any final protocol format freely.
+        """
+        grp = QGroupBox("Boost / Kick / Ramp / PI / Telemetry")
+        form = QFormLayout(grp)
+        form.setSpacing(6)
+        form.setContentsMargins(10, 14, 10, 10)
+
+        self._boostms_edit  = QLineEdit(); self._boostms_edit.setPlaceholderText("0")
+        self._kick_duty_edit = QLineEdit(); self._kick_duty_edit.setPlaceholderText("0")
+        self._kick_ms_edit  = QLineEdit(); self._kick_ms_edit.setPlaceholderText("0")
+        self._ramp_up_edit  = QLineEdit(); self._ramp_up_edit.setPlaceholderText("0")
+        self._ramp_dn_edit  = QLineEdit(); self._ramp_dn_edit.setPlaceholderText("0")
+        self._kp_edit       = QLineEdit(); self._kp_edit.setPlaceholderText("0")
+        self._ki_edit       = QLineEdit(); self._ki_edit.setPlaceholderText("0")
+        self._telper_edit   = QLineEdit(); self._telper_edit.setPlaceholderText("100")
+
+        form.addRow("Boost MS:",         self._boostms_edit)
+        form.addRow("Kick Duty:",         self._kick_duty_edit)
+        form.addRow("Kick MS:",           self._kick_ms_edit)
+        form.addRow("Ramp Up:",          self._ramp_up_edit)
+        form.addRow("Ramp Down:",         self._ramp_dn_edit)
+        form.addRow("Kp:",                self._kp_edit)
+        form.addRow("Ki:",                self._ki_edit)
+        form.addRow("Telemetry Period:", self._telper_edit)
+        return grp
+
+    def _build_custom_group(self) -> QGroupBox:
+        """Optional custom command text box."""
+        grp = QGroupBox("Custom Command")
+        lay = QHBoxLayout(grp)
+        lay.setContentsMargins(10, 14, 10, 10)
+        self._custom_edit = QLineEdit()
+        self._custom_edit.setPlaceholderText(
+            "Free-text command line (appended after the motor tag)"
+        )
+        lay.addWidget(self._custom_edit, 1)
+        return grp
+
+    def _build_send_row(self) -> QHBoxLayout:
+        """Per-motor direct send buttons + Send to All."""
+        row = QHBoxLayout()
+        row.setSpacing(6)
+
+        self._send_buttons: dict[str, QPushButton] = {}
+        for motor in self.MOTOR_TAGS + ("All",):
+            btn = QPushButton(f"Send to {motor}")
+            btn.clicked.connect(lambda _=False, m=motor: self._on_send_to(motor))
+            row.addWidget(btn, 1)
+            self._send_buttons[motor] = btn
+        return row
+
+    def _build_utility_row(self) -> QHBoxLayout:
+        """Reset Fields + Close."""
+        row = QHBoxLayout()
+        row.setSpacing(6)
+
+        self._btn_reset = QPushButton("Reset Fields")
+        self._btn_reset.clicked.connect(self._reset_fields)
+        row.addWidget(self._btn_reset, 1)
+
+        self._btn_close = QPushButton("Close")
+        self._btn_close.clicked.connect(self.accept)
+        row.addWidget(self._btn_close, 1)
+        return row
+
+    def _build_read_row(self) -> QHBoxLayout:
+        """Placeholder Read buttons — one per motor (no Read All)."""
+        row = QHBoxLayout()
+        row.setSpacing(6)
+        for motor in self.MOTOR_TAGS:
+            btn = QPushButton(f"Read {motor}")
+            row.addWidget(btn, 1)
+        return row
+
+    # ══════════════════════════════════════════════════════════════════════
+    #  Theme styling
+    # ══════════════════════════════════════════════════════════════════════
+
+    def _apply_theme_style(self):
+        """Style the dialog using the active main-window palette so the popup
+        stays visually consistent with the rest of the GUI (dark or light).
+        Colors are pulled from self._gui._colors(); no hardcoded theme colors.
+        """
+        c = self._gui._colors()
+        self.setStyleSheet(f"""
+            QDialog {{
+                background-color: {c['bg_main']};
+                color: {c['text']};
+                font-size: 13px;
+                font-weight: {c['font_weight']};
+            }}
+            QLabel {{
+                color: {c['text']};
+            }}
+            QGroupBox {{
+                background-color: {c['bg_panel']};
+                border: 1px solid {c['border']};
+                border-radius: 6px;
+                margin-top: 10px;
+                padding-top: 14px;
+                color: {c['text']};
+                font-weight: bold;
+            }}
+            QGroupBox::title {{
+                subcontrol-origin: margin;
+                left: 12px;
+                padding: 0 6px;
+                color: {c['accent_gold']};
+            }}
+            QPushButton {{
+                background-color: {c['bg_input']};
+                border: 1px solid {c['accent_gold']};
+                border-radius: 6px;
+                padding: 6px 14px;
+                color: {c['accent_gold']};
+                font-weight: bold;
+                min-height: 28px;
+            }}
+            QPushButton:hover {{
+                background-color: {c['selection_bg']};
+            }}
+            QPushButton:pressed {{
+                background-color: {c['pressed_bg']};
+            }}
+            QLineEdit {{
+                background-color: {c['bg_input']};
+                border: 1px solid {c['border']};
+                border-radius: 4px;
+                padding: 4px 8px;
+                color: {c['text']};
+                font-weight: {c['font_weight']};
+            }}
+        """)
+
+    # ══════════════════════════════════════════════════════════════════════
+    #  Helpers
+    # ══════════════════════════════════════════════════════════════════════
+
+    def collect_f411_tuning_settings(self) -> dict:
+        """Read the entire dialog form into a plain dict.
+
+        Returned dict shape (all values are raw strings typed by the operator
+        — no up/down spinbox logic):
+            {
+                "base":      [str]*8,  # Base PWM 1..8
+                "boost":     [str]*8,  # Boost PWM 1..8
+                "boostms":   str,      # single global Boost MS field
+                "kick_duty": str,
+                "kick_ms":   str,
+                "ramp_up":   str, "ramp_down": str,
+                "kp":        str, "ki": str,
+                "telper":    str,
+                "custom":    str,
+            }
+        Keeping everything as strings leaves the placeholder builder free to
+        emit any final protocol format (integers, floats, hex...) when the
+        real H7/F411 parser is wired.  Boost MS is a single global value,
+        not one per tuning slot.
+        """
+        return {
+            "base":      [e.text().strip() for e in self._base_edits],
+            "boost":     [e.text().strip() for e in self._boost_edits],
+            "boostms":   self._boostms_edit.text().strip(),
+            "kick_duty": self._kick_duty_edit.text().strip(),
+            "kick_ms":   self._kick_ms_edit.text().strip(),
+            "ramp_up":   self._ramp_up_edit.text().strip(),
+            "ramp_down": self._ramp_dn_edit.text().strip(),
+            "kp":        self._kp_edit.text().strip(),
+            "ki":        self._ki_edit.text().strip(),
+            "telper":    self._telper_edit.text().strip(),
+            "custom":    self._custom_edit.text().strip(),
+        }
+
+    def _resolve_motors(self, key: str) -> list:
+        """Map a send-button key ("FL"/"FR"/"RL"/"RR"/"All") to the motor
+        tag(s) used by the H7 terminal.  "All" now maps to the single
+        tag "ALL" so the H7 firmware broadcasts once instead of four
+        separate per-motor sends."""
+        if key == "All":
+            return ["ALL"]
+        return [key] if key in self.MOTOR_TAGS else []
+
+    def _reset_fields(self, log: bool = True):
+        """Restore all text boxes to the default values."""
+        d = self._defaults
+        for i in range(self.NUM_SLOTS):
+            self._base_edits[i].setText(d["base"][i])
+            self._boost_edits[i].setText(d["boost"][i])
+        self._boostms_edit.setText(d["boostms"])
+        self._kick_duty_edit.setText(d["kick_duty"])
+        self._kick_ms_edit.setText(d["kick_ms"])
+        self._ramp_up_edit.setText(d["ramp_up"])
+        self._ramp_dn_edit.setText(d["ramp_down"])
+        self._kp_edit.setText(d["kp"])
+        self._ki_edit.setText(d["ki"])
+        self._telper_edit.setText(d["telper"])
+        self._custom_edit.clear()
+        if log:
+            self._gui._log_info("[F411-TUNE] Settings dialog fields reset to defaults")
+
+    # ══════════════════════════════════════════════════════════════════════
+    #  Send handlers — single dispatch path for every send button
+    # ══════════════════════════════════════════════════════════════════════
+
+    def _on_send_to(self, target: str):
+        """Send the whole form (tuning slots + ramp + PI + telper + custom)
+        to one target ("FL"/"FR"/"RL"/"RR"/"All").
+
+        "All" generates ALL commands; individual targets generate per-motor
+        commands.  All command building goes through the centralized
+        build_f411_tuning_commands() helper.
+        """
+        motors = self._resolve_motors(target)
+        if not motors:
+            self._gui._log_warn(f"[F411-TUNE] Unknown send target {target!r}")
+            return
+
+        settings = self.collect_f411_tuning_settings()
+
+        n = 0
+        for motor in motors:
+            cmds = self._gui.build_f411_tuning_commands(motor, settings)
+            for cmd in cmds:
+                self._gui.send_f411_tuning_command(motor, cmd)
+                n += 1
+
+        self._gui._log_info(
+            f"[F411-TUNE] Dispatched {n} tuning command(s) to "
+            f"{', '.join(motors)}"
+        )
 
 
 # ════════════════════════════════════════════════════════════════════════════
@@ -412,7 +782,7 @@ class EarendilControlGui(QMainWindow):
     DEFAULT_RPM = 100
     DEFAULT_PWM = 100
     RPM_MAX = 200
-    PWM_MAX = 255
+    PWM_MAX = 4000
     VALUE_STEP = 5
 
     # ── Motor table row index ─────────────────────────────────────────────
@@ -778,6 +1148,17 @@ class EarendilControlGui(QMainWindow):
         self._motor_table.setFocusPolicy(Qt.NoFocus)
         self._motor_table.setMaximumHeight(160)
         lay.addWidget(self._motor_table)
+
+        # ── Settings button (opens F411 Motor Tuning Settings dialog) ─────
+        # Right-aligned so it reads as "table → settings" within the group.
+        btn_row = QHBoxLayout()
+        btn_row.setContentsMargins(0, 0, 0, 0)
+        btn_row.addStretch()
+
+        self._btn_motor_settings = QPushButton("Settings")
+        self._btn_motor_settings.clicked.connect(self._open_motor_settings)
+        btn_row.addWidget(self._btn_motor_settings)
+        lay.addLayout(btn_row)
         return grp
 
     # ── 9-axis IMU placeholder ────────────────────────────────────────────
@@ -967,6 +1348,8 @@ class EarendilControlGui(QMainWindow):
         self._style_connection_status()
         self._style_console_widgets()
         self._style_help_button()
+        if hasattr(self, "_btn_motor_settings"):
+            self._style_motor_settings_button()
         if hasattr(self, "_lbl_op_mode_status"):
             self._update_operating_mode_ui(self._operating_mode)
 
@@ -1075,6 +1458,21 @@ class EarendilControlGui(QMainWindow):
             f"border: 1px solid {c['accent_gold']}; "
             f"color: {c['accent_gold']}; font-weight: bold; }}"
             f"QPushButton:hover {{ background-color: {c['selection_bg']}; }}"
+        )
+
+    def _style_motor_settings_button(self):
+        """Style the Motor State 'Settings' button for the active theme.
+
+        Visually grouped with the help button (same accent/border language)
+        so the new entry stays consistent with the existing palette.
+        """
+        c = self._colors()
+        self._btn_motor_settings.setStyleSheet(
+            f"QPushButton {{ background-color: {c['bg_input']}; "
+            f"border: 1px solid {c['accent_gold']}; "
+            f"color: {c['accent_gold']}; font-weight: bold; }}"
+            f"QPushButton:hover {{ background-color: {c['selection_bg']}; }}"
+            f"QPushButton:pressed {{ background-color: {c['pressed_bg']}; }}"
         )
 
     def _style_mode_value_labels(self):
@@ -1772,6 +2170,159 @@ class EarendilControlGui(QMainWindow):
         close_btn.clicked.connect(dlg.accept)
         layout.addWidget(close_btn, alignment=Qt.AlignCenter)
 
+        dlg.exec()
+
+    # ══════════════════════════════════════════════════════════════════════
+    #  F411 Motor Tuning — placeholder command builder + sender
+    # ══════════════════════════════════════════════════════════════════════
+    #  Single source of truth for the placeholder F411 tuning command format.
+    #  The GUI forwards tuning commands to the H7 firmware via the
+    #  "<MOTOR> <keyword> <args...>" syntax.  The H7 parser validates
+    #  and normalises these before forwarding the payload to the
+    #  selected F411 motor UART.  For "ALL", the H7 broadcasts to
+    #  all four motor UARTs.
+    #
+    #  Settings dict shape produced by the dialog
+    #  (MotorSettingsDialog.collect_f411_tuning_settings):
+    #     base      : list[str]*8   (Base PWM 1..8, raw text)
+    #     boost     : list[str]*8   (Boost PWM 1..8, raw text)
+    #     boostms   : str           (single global Boost MS, raw text)
+    #     kick_duty : str           (raw text)
+    #     kick_ms   : str           (raw text)
+    #     ramp_up   : str           (raw text)
+    #     ramp_down : str           (raw text)
+    #     kp        : str           (raw text)
+    #     ki        : str           (raw text)
+    #     telper    : str           (raw text)
+    #     custom    : str           (raw text — handled by the dialog itself)
+
+    # H7 motor tuning command keywords — match the firmware parser exactly.
+    # Format: "<MOTOR> <keyword> <args...>" sent through _send_cmd().
+    F411_TUNE_KW_BASE     = "base"       # <P1>..<P8>
+    F411_TUNE_KW_BOOST    = "boost"      # <P1>..<P8> <MS>
+    F411_TUNE_KW_KICKDUTY = "kickduty"   # <VALUE>
+    F411_TUNE_KW_KICKMS   = "kickms"     # <VALUE>
+    F411_TUNE_KW_RAMP     = "ramp"       # <UP> <DOWN>
+    F411_TUNE_KW_PI       = "pi"         # <KP> <KI>
+    F411_TUNE_KW_TELPER   = "telper"     # <MS>
+
+    def build_f411_tuning_commands(self, target_motor: str, settings: dict) -> list:
+        """Build validated H7 motor tuning commands for one motor or ALL.
+
+        `target_motor` is one of "FL", "FR", "RL", "RR", "ALL".
+        Returns a list of complete H7 terminal command strings ready to
+        send through _send_cmd().  Skips commands whose required fields
+        are empty or inconsistent, logging a GUI warning for partial input.
+        """
+        cmds = []
+        log = self._log_warn  # shorthand
+
+        # ── Base PWM: base P1 P2 P3 P4 P5 P6 P7 P8 ────────────────────
+        bases = settings.get("base", [""] * 8) or [""] * 8
+        # Pad to 8 if shorter
+        while len(bases) < 8:
+            bases.append("")
+        all_empty = all(v == "" for v in bases[:8])
+        some_empty = not all_empty and any(v == "" for v in bases[:8])
+        if all_empty:
+            pass  # skip silently
+        elif some_empty:
+            log("[F411-TUNE] Base PWM: not all 8 values filled — skipped")
+        else:
+            vals = " ".join(v if v != "" else "0" for v in bases[:8])
+            cmds.append(f"{target_motor} {self.F411_TUNE_KW_BASE} {vals}")
+
+        # ── Boost PWM: boost P1..P8 MS ────────────────────────────────
+        boosts = settings.get("boost", [""] * 8) or [""] * 8
+        while len(boosts) < 8:
+            boosts.append("")
+        boostms = settings.get("boostms", "")
+        all_b_empty = all(v == "" for v in boosts[:8]) and boostms == ""
+        some_b_empty = not all_b_empty and (
+            any(v == "" for v in boosts[:8]) or boostms == "")
+        if all_b_empty:
+            pass
+        elif some_b_empty:
+            log("[F411-TUNE] Boost: need all 8 PWM values + Boost MS — skipped")
+        else:
+            pvals = " ".join(v if v != "" else "0" for v in boosts[:8])
+            cmds.append(
+                f"{target_motor} {self.F411_TUNE_KW_BOOST} {pvals} {boostms}"
+            )
+
+        # ── Kick Duty: kickduty VALUE ──────────────────────────────────
+        kick_duty = settings.get("kick_duty", "")
+        if kick_duty != "":
+            cmds.append(
+                f"{target_motor} {self.F411_TUNE_KW_KICKDUTY} {kick_duty}"
+            )
+
+        # ── Kick MS: kickms VALUE ──────────────────────────────────────
+        kick_ms = settings.get("kick_ms", "")
+        if kick_ms != "":
+            cmds.append(
+                f"{target_motor} {self.F411_TUNE_KW_KICKMS} {kick_ms}"
+            )
+
+        # ── Ramp: ramp UP DOWN ─────────────────────────────────────────
+        ramp_up = settings.get("ramp_up", "")
+        ramp_dn = settings.get("ramp_down", "")
+        if ramp_up == "" and ramp_dn == "":
+            pass
+        elif ramp_up == "" or ramp_dn == "":
+            log("[F411-TUNE] Ramp: need both Up and Down — skipped")
+        else:
+            cmds.append(
+                f"{target_motor} {self.F411_TUNE_KW_RAMP} {ramp_up} {ramp_dn}"
+            )
+
+        # ── PI: pi KP KI ──────────────────────────────────────────────
+        kp = settings.get("kp", "")
+        ki = settings.get("ki", "")
+        if kp == "" and ki == "":
+            pass
+        elif kp == "" or ki == "":
+            log("[F411-TUNE] PI: need both Kp and Ki — skipped")
+        else:
+            cmds.append(
+                f"{target_motor} {self.F411_TUNE_KW_PI} {kp} {ki}"
+            )
+
+        # ── Telemetry Period: telper MS ────────────────────────────────
+        telper = settings.get("telper", "")
+        if telper != "":
+            cmds.append(
+                f"{target_motor} {self.F411_TUNE_KW_TELPER} {telper}"
+            )
+
+        # ── Custom command ─────────────────────────────────────────────
+        custom = settings.get("custom", "")
+        if custom:
+            cmds.append(f"{target_motor} {custom}")
+
+        return cmds
+
+    def send_f411_tuning_command(self, target_motor: str, command: str):
+        """Send one validated H7 motor tuning command line and log it.
+
+        `command` must be the full line (e.g. "FL pi 0.8 0.05") and is
+        forwarded through _send_cmd() — the same serial path used by all
+        other H7 terminal commands.  If serial is not connected, the
+        command is still logged with a warning so the operator can see
+        what would have been sent.
+        with a warning so the operator can see what would have been sent.
+        """
+        if not self.connected or not self.ser or not self.ser.is_open:
+            self._log_warn(
+                f"[F411-TUNE] Not sent (serial disconnected): {command}"
+            )
+            return
+        self._log_info(f"[F411-TUNE] {command}")
+        self._send_cmd(command)
+
+    def _open_motor_settings(self):
+        """Open the F411 Motor Tuning Settings dialog (Modal)."""
+        dlg = MotorSettingsDialog(self, self)
         dlg.exec()
 
     # ══════════════════════════════════════════════════════════════════════

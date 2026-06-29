@@ -125,6 +125,62 @@ bool MotorDispatcher_SendRawToMotor(MotorId_t motor, const char *msg)
     return MotorTxDma_Send(motor, frame);
 }
 
+bool MotorDispatcher_SendTunePayload(TuneMotorTarget_t target, const char *payload)
+{
+    if (payload == NULL || payload[0] == '\0')
+        return false;
+
+    const char *names[] = {"FL", "FR", "RL", "RR"};
+    bool allOk = true;
+
+    if (target == TUNE_MOTOR_ALL)
+    {
+        for (int i = 0; i < MOTOR_COUNT; i++)
+        {
+            char frame[64];
+            int len = snprintf(frame, sizeof(frame), "%s\r\n", payload);
+            if (len <= 0 || (uint16_t)len >= sizeof(frame))
+            {
+                allOk = false;
+                continue;
+            }
+            if (MotorTxDma_Send((MotorId_t)i, frame))
+            {
+                Logger_Log(LOG_INFO, "[TUNE] %s -> %s", names[i], payload);
+            }
+            else
+            {
+                Logger_Log(LOG_ERROR, "[TUNE] TX failed for %s", names[i]);
+                allOk = false;
+            }
+        }
+    }
+    else
+    {
+        /* Single motor target: TUNE_MOTOR_FL=1 -> MOTOR_FL=0, etc. */
+        MotorId_t motor = (MotorId_t)((int)target - 1);
+        if (motor >= MOTOR_COUNT)
+            return false;
+
+        char frame[64];
+        int len = snprintf(frame, sizeof(frame), "%s\r\n", payload);
+        if (len <= 0 || (uint16_t)len >= sizeof(frame))
+            return false;
+
+        if (MotorTxDma_Send(motor, frame))
+        {
+            Logger_Log(LOG_INFO, "[TUNE] %s -> %s", names[motor], payload);
+        }
+        else
+        {
+            Logger_Log(LOG_ERROR, "[TUNE] TX failed for %s", names[motor]);
+            allOk = false;
+        }
+    }
+
+    return allOk;
+}
+
 MotorLink_t *MotorDispatcher_GetLink(MotorId_t id)
 {
     if (id >= MOTOR_COUNT)

@@ -5,19 +5,19 @@
 
 static MotorCmd_t motorCmds[MOTOR_COUNT];
 
-static void SetMotor(MotorId_t id, MotorDir_t dir, uint8_t pwm)
+static void SetMotor(MotorId_t id, MotorDir_t dir, uint16_t pwm)
 {
     motorCmds[id].dir = dir;
     motorCmds[id].pwm = pwm;
 }
 
-static void SetAllMotors(MotorDir_t dir, uint8_t pwm)
+static void SetAllMotors(MotorDir_t dir, uint16_t pwm)
 {
     for (int i = 0; i < MOTOR_COUNT; i++)
         SetMotor((MotorId_t)i, dir, pwm);
 }
 
-static void SetMotorCmd(MotorId_t id, MotorDir_t dir, uint8_t pwm)
+static void SetMotorCmd(MotorId_t id, MotorDir_t dir, uint16_t pwm)
 {
     motorCmds[id].dir = dir;
     motorCmds[id].pwm = pwm;
@@ -33,7 +33,7 @@ void MotionController_Execute(const MotionCmd_t *cmd)
     if (cmd == NULL)
         return;
 
-    uint8_t spd = cmd->speed;
+    uint16_t spd = cmd->speed;
 
     switch (cmd->direction)
     {

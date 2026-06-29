@@ -36,14 +36,14 @@ typedef enum
 typedef struct
 {
     MotorDir_t dir;
-    uint8_t    pwm;      /* 0–255 */
+    uint16_t   pwm;      /* 0–4000 */
 } MotorCmd_t;
 
 /* ── Motion command (abstract, from terminal) ───────────────────────────── */
 typedef struct
 {
     Direction_t direction;
-    uint8_t     speed;   /* 0–255 */
+    uint16_t    speed;   /* 0–4000 */
 } MotionCmd_t;
 
 /* ── Control mode (RPM / PWM) ─────────────────────────────────────────────── */

@@ -3,6 +3,7 @@
 
 #include "rover_types.h"
 #include "motor_link.h"
+#include "terminal_parser.h"
 
 /* ── Public API ─────────────────────────────────────────────────────────── */
 void MotorDispatcher_Init(void);
@@ -23,6 +24,14 @@ bool MotorDispatcher_SendRaw(const char *msg);
  * does NOT log the frame — callers (e.g. the direct-motor command
  * handler) own the [RAW][<tag>] <text> log line to avoid duplicates. */
 bool MotorDispatcher_SendRawToMotor(MotorId_t motor, const char *msg);
+
+/* Send a validated tuning payload to one or all motor UARTs.
+ * `target` — TUNE_MOTOR_FL / FR / RL / RR / ALL.
+ * `payload` — normalised NUL-terminated string, e.g. "base 40 40 45 45 50 50 55 55".
+ * The function appends "\r\n" before transmitting.
+ * For ALL, the payload is sent to every motor UART.
+ * Returns true if every target accepted the frame. */
+bool MotorDispatcher_SendTunePayload(TuneMotorTarget_t target, const char *payload);
 
 MotorLink_t *MotorDispatcher_GetLink(MotorId_t id);
 void MotorDispatcher_Update(void);

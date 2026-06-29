@@ -199,7 +199,7 @@ void CommandHandler_PrintHelp(void)
     Logger_Log(LOG_INFO, "  mode manual      Manual mode (green LED, motors stopped)");
     Logger_Log(LOG_INFO, "  mode auto        Autonomous mode (yellow LED, motors stopped)");
     Logger_Log(LOG_INFO, "  mode autonomous  Alias for 'mode auto'");
-    Logger_Log(LOG_INFO, "  While DISARM: only mode/status/help/stop/brake are accepted.");
+    Logger_Log(LOG_INFO, "  While DISARM: only mode/status/help/stop/brake/tuning are accepted.");
     Logger_Log(LOG_INFO, "");
     Logger_Log(LOG_INFO, "RPM mode commands:");
     Logger_Log(LOG_INFO, "  f0..f200         Forward RPM command");
@@ -208,10 +208,10 @@ void CommandHandler_PrintHelp(void)
     Logger_Log(LOG_INFO, "  l0..l200         Left turn RPM command");
     Logger_Log(LOG_INFO, "");
     Logger_Log(LOG_INFO, "PWM mode commands:");
-    Logger_Log(LOG_INFO, "  fd0..fd255       Forward PWM/duty command");
-    Logger_Log(LOG_INFO, "  bd0..bd255       Backward PWM/duty command");
-    Logger_Log(LOG_INFO, "  rd0..rd255       Right turn PWM/duty command");
-    Logger_Log(LOG_INFO, "  ld0..ld255       Left turn PWM/duty command");
+    Logger_Log(LOG_INFO, "  fd0..fd4000      Forward PWM/duty command");
+    Logger_Log(LOG_INFO, "  bd0..bd4000      Backward PWM/duty command");
+    Logger_Log(LOG_INFO, "  rd0..rd4000      Right turn PWM/duty command");
+    Logger_Log(LOG_INFO, "  ld0..ld4000      Left turn PWM/duty command");
     Logger_Log(LOG_INFO, "");
     Logger_Log(LOG_INFO, "Common commands:");
     Logger_Log(LOG_INFO, "  stop             Stop motors");
@@ -229,6 +229,17 @@ void CommandHandler_PrintHelp(void)
     Logger_Log(LOG_INFO, "  FR identify");
     Logger_Log(LOG_INFO, "  RL f100");
     Logger_Log(LOG_INFO, "  RR mode speed");
+    Logger_Log(LOG_INFO, "");
+    Logger_Log(LOG_INFO, "Motor tuning:");
+    Logger_Log(LOG_INFO, "  FL base P1 P2 P3 P4 P5 P6 P7 P8");
+    Logger_Log(LOG_INFO, "  FL boost P1 P2 P3 P4 P5 P6 P7 P8 MS");
+    Logger_Log(LOG_INFO, "  FL kickduty VALUE    (or: FL kick duty VALUE)");
+    Logger_Log(LOG_INFO, "  FL kickms VALUE      (or: FL kick ms VALUE)");
+    Logger_Log(LOG_INFO, "  FL ramp UP DOWN");
+    Logger_Log(LOG_INFO, "  FL pi KP KI");
+    Logger_Log(LOG_INFO, "  FL telper MS");
+    Logger_Log(LOG_INFO, "  ALL base / boost / kickduty / kickms / ramp / pi / telper");
+    Logger_Log(LOG_INFO, "");
     Logger_Log(LOG_INFO, "  help             Show this command list");
 }
 
@@ -252,6 +263,7 @@ void CommandHandler_Handle(const TerminalCommand_t *cmd)
             case TCMD_MODE_QUERY:   /* mode (query) */
             case TCMD_STOP:         /* stop (safe) */
             case TCMD_BRAKE:        /* brake (safe) */
+            case TCMD_MOTOR_TUNE:   /* tuning: no motion, allowed in DISARM */
                 allowed = true;
                 break;
 
@@ -389,6 +401,17 @@ void CommandHandler_Handle(const TerminalCommand_t *cmd)
             {
                 Logger_Log(LOG_ERROR, "Direct motor TX failed for %s",
                            MotorTagName(cmd->rawMotor));
+            }
+            break;
+        }
+
+        case TCMD_MOTOR_TUNE:
+        {
+            /* Validated tuning command — forward normalised payload. */
+            if (!MotorDispatcher_SendTunePayload(cmd->tuneTarget,
+                                                 cmd->tunePayload))
+            {
+                Logger_Log(LOG_ERROR, "[TUNE] Dispatch failed");
             }
             break;
         }

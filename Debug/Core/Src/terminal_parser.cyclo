@@ -1,3 +1,7 @@
-../Core/Src/terminal_parser.c:10:13:allDigits	4
-../Core/Src/terminal_parser.c:24:13:FillMotion	2
-../Core/Src/terminal_parser.c:47:6:TerminalParser_Parse	64
+../Core/Src/terminal_parser.c:11:13:allDigits	4
+../Core/Src/terminal_parser.c:26:13:IsInt	8
+../Core/Src/terminal_parser.c:45:13:IsNumeric	10
+../Core/Src/terminal_parser.c:75:13:NextToken	6
+../Core/Src/terminal_parser.c:100:13:ParseTuneCommand	84
+../Core/Src/terminal_parser.c:360:13:FillMotion	2
+../Core/Src/terminal_parser.c:383:6:TerminalParser_Parse	73

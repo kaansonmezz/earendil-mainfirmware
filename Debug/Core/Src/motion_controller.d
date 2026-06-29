@@ -33,7 +33,7 @@ Core/Src/motion_controller.o: ../Core/Src/motion_controller.c \
  ../Drivers/STM32H7xx_HAL_Driver/Inc/stm32h7xx_hal_pwr_ex.h \
  ../Drivers/STM32H7xx_HAL_Driver/Inc/stm32h7xx_hal_uart.h \
  ../Drivers/STM32H7xx_HAL_Driver/Inc/stm32h7xx_hal_uart_ex.h \
- ../Core/Inc/logger.h
+ ../Core/Inc/terminal_parser.h ../Core/Inc/logger.h
 ../Core/Inc/motion_controller.h:
 ../Core/Inc/rover_types.h:
 ../Core/Inc/motor_dispatcher.h:
@@ -70,4 +70,5 @@ Core/Src/motion_controller.o: ../Core/Src/motion_controller.c \
 ../Drivers/STM32H7xx_HAL_Driver/Inc/stm32h7xx_hal_pwr_ex.h:
 ../Drivers/STM32H7xx_HAL_Driver/Inc/stm32h7xx_hal_uart.h:
 ../Drivers/STM32H7xx_HAL_Driver/Inc/stm32h7xx_hal_uart_ex.h:
+../Core/Inc/terminal_parser.h:
 ../Core/Inc/logger.h:
