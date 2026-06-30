@@ -18,5 +18,6 @@ void     Logger_Init(void);
 void     Logger_Log(LogLevel_t level, const char *fmt, ...);
 void     Logger_LogMotorCmd(MotorId_t id, const MotorCmd_t *cmd);
 void     Logger_LogAck(MotorId_t id, AckStatus_t status);
+void     Logger_LogIMU(float roll, float pitch, float yaw);
 
 #endif /* LOGGER_H */

@@ -48,3 +48,11 @@ void Logger_LogAck(MotorId_t id, AckStatus_t status)
     const char *statusStr[] = { "NONE", "OK", "TIMEOUT", "ERROR" };
     Logger_Log(LOG_DEBUG, "ACK %s status=%s", names[id], statusStr[status]);
 }
+
+void Logger_LogIMU(float roll, float pitch, float yaw)
+{
+    // Custom IMU tag string that parser can catch
+    char imuBuf[64];
+    snprintf(imuBuf, sizeof(imuBuf), "[IMU] Roll: %.2f Pitch: %.2f Yaw: %.2f\r\n", roll, pitch, yaw);
+    HAL_UART_Transmit(&huart3, (uint8_t *)imuBuf, (uint16_t)strlen(imuBuf), HAL_MAX_DELAY);
+}

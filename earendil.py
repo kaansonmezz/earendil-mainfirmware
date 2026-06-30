@@ -218,6 +218,10 @@ _RE_OP_MODE_CONFIRM = re.compile(
     r"\[MODE\]\s+(DISARM|MANUAL|AUTONOMOUS)\s+active\b"
 )
 
+_RE_IMU_DATA = re.compile(
+    r"^\[IMU\]\s+Roll:\s+([-\d.]+)\s+Pitch:\s+([-\d.]+)\s+Yaw:\s+([-\d.]+)$"
+)
+
 
 # ════════════════════════════════════════════════════════════════════════════
 #  Main GUI
@@ -820,7 +824,6 @@ class EarendilControlGui(QMainWindow):
         """Update the IMU table from a 9-axis reading.
 
         `values` keys: AX, AY, AZ, GX, GY, GZ, MX, MY, MZ.
-        Kept as a hook for future firmware IMU parsing; currently unused.
         """
         rows = {"A": 0, "G": 1, "M": 2}
         for field in self.IMU_FIELDS:
@@ -1281,6 +1284,18 @@ class EarendilControlGui(QMainWindow):
         self._parse_rx_for_motor_state(line)
         self._parse_uart_error_line(line)
         self._parse_operating_mode_confirm(line)
+        self._parse_imu_line(line)
+
+    def _parse_imu_line(self, line: str):
+        match = _RE_IMU_DATA.match(line)
+        if match:
+            try:
+                roll = float(match.group(1))
+                pitch = float(match.group(2))
+                yaw = float(match.group(3))
+                self._update_imu_values({"AX": roll, "AY": pitch, "AZ": yaw})
+            except ValueError:
+                pass
 
     def _parse_rx_for_motor_state(self, line: str):
         """Minimal parsing: update Link column if link-lost/recovered detected."""

@@ -22,6 +22,8 @@
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
 #include "app_main.h"
+#include "mpu9250.h"
+#include "logger.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -56,6 +58,8 @@ DMA_HandleTypeDef hdma_usart2_rx;
 DMA_HandleTypeDef hdma_usart2_tx;
 
 /* USER CODE BEGIN PV */
+I2C_HandleTypeDef hi2c1;
+MPU9250_t MPU9250;
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -69,7 +73,7 @@ static void MX_UART7_Init(void);
 static void MX_USART2_UART_Init(void);
 static void MX_USART3_UART_Init(void);
 /* USER CODE BEGIN PFP */
-
+static void MX_I2C1_Init(void);
 /* USER CODE END PFP */
 
 /* Private user code ---------------------------------------------------------*/
@@ -116,6 +120,13 @@ int main(void)
   MX_USART2_UART_Init();
   MX_USART3_UART_Init();
   /* USER CODE BEGIN 2 */
+  MX_I2C1_Init();
+  MPU9250_Init(&hi2c1);
+  MPU9250_Calibrate(&hi2c1, &MPU9250);
+
+  uint32_t prev_time = HAL_GetTick();
+  uint8_t i2c_fail_count = 0U;
+
   App_Init();
   /* USER CODE END 2 */
 
@@ -126,6 +137,36 @@ int main(void)
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
+    uint32_t current_time = HAL_GetTick();
+    float dt = (float)(current_time - prev_time) / 1000.0f;
+    prev_time = current_time;
+
+    if (dt > 0.1f)  { dt = 0.1f;  }
+    if (dt <= 0.0f) { dt = 0.001f; }
+
+    if (MPU9250_Read_Accel_Gyro(&hi2c1, &MPU9250) == 1U)
+    {
+        MPU9250_Calculate_Angles(&MPU9250, dt);
+        i2c_fail_count = 0U;
+        
+        static uint32_t last_log = 0;
+        if (current_time - last_log >= 100) { // Log every 100ms
+            Logger_LogIMU(MPU9250.Roll, MPU9250.Pitch, MPU9250.Yaw);
+            last_log = current_time;
+        }
+    }
+    else
+    {
+        i2c_fail_count++;
+        if (i2c_fail_count > 10U)
+        {
+            HAL_I2C_DeInit(&hi2c1);
+            MX_I2C1_Init();
+            MPU9250_Init(&hi2c1);
+            i2c_fail_count = 0U;
+        }
+    }
+
     App_Update();
   }
   /* USER CODE END 3 */
@@ -501,7 +542,35 @@ static void MX_GPIO_Init(void)
 }
 
 /* USER CODE BEGIN 4 */
-
+/**
+  * @brief I2C1 Initialization Function
+  * @param None
+  * @retval None
+  */
+static void MX_I2C1_Init(void)
+{
+  hi2c1.Instance = I2C1;
+  hi2c1.Init.Timing = 0x009034B6;
+  hi2c1.Init.OwnAddress1 = 0;
+  hi2c1.Init.AddressingMode = I2C_ADDRESSINGMODE_7BIT;
+  hi2c1.Init.DualAddressMode = I2C_DUALADDRESS_DISABLE;
+  hi2c1.Init.OwnAddress2 = 0;
+  hi2c1.Init.OwnAddress2Masks = I2C_OA2_NOMASK;
+  hi2c1.Init.GeneralCallMode = I2C_GENERALCALL_DISABLE;
+  hi2c1.Init.NoStretchMode = I2C_NOSTRETCH_DISABLE;
+  if (HAL_I2C_Init(&hi2c1) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  if (HAL_I2CEx_ConfigAnalogFilter(&hi2c1, I2C_ANALOGFILTER_ENABLE) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  if (HAL_I2CEx_ConfigDigitalFilter(&hi2c1, 0) != HAL_OK)
+  {
+    Error_Handler();
+  }
+}
 /* USER CODE END 4 */
 
  /* MPU Configuration */
