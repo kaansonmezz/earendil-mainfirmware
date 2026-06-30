@@ -6,6 +6,7 @@
 #include "activity_light.h"
 #include "operating_mode.h"
 #include "safety_manager.h"
+#include "terminal_if.h"
 #include "logger.h"
 #include <string.h>
 
@@ -218,6 +219,7 @@ void CommandHandler_PrintHelp(void)
     Logger_Log(LOG_INFO, "  brake            Send brake command: x");
     Logger_Log(LOG_INFO, "  identify         Arm motors, then send identify to all motor UARTs");
     Logger_Log(LOG_INFO, "  status           Send status to all motor UARTs");
+    Logger_Log(LOG_INFO, "  termstat         Terminal RX queue diagnostics");
     Logger_Log(LOG_INFO, "");
     Logger_Log(LOG_INFO, "Direct motor command:");
     Logger_Log(LOG_INFO, "  FL <text>        Send raw text only to Front Left motor");
@@ -260,6 +262,7 @@ void CommandHandler_Handle(const TerminalCommand_t *cmd)
             case TCMD_OP_MODE:      /* mode disarm/manual/auto/autonomous */
             case TCMD_HELP:         /* help */
             case TCMD_STATUS:       /* status (query) */
+            case TCMD_TERMSTAT:     /* termstat (query) */
             case TCMD_MODE_QUERY:   /* mode (query) */
             case TCMD_STOP:         /* stop (safe) */
             case TCMD_BRAKE:        /* brake (safe) */
@@ -379,6 +382,14 @@ void CommandHandler_Handle(const TerminalCommand_t *cmd)
 
         case TCMD_STATUS:
             MotorDispatcher_SendRaw("status");
+            break;
+
+        case TCMD_TERMSTAT:
+            Logger_Log(LOG_INFO, "[TERM] rx_lines=%lu dropped=%lu pending=%u max_depth=%u",
+                       (unsigned long)TerminalIf_GetReceivedLineCount(),
+                       (unsigned long)TerminalIf_GetDroppedLineCount(),
+                       (unsigned)TerminalIf_GetPendingLineCount(),
+                       (unsigned)TerminalIf_GetMaxLineQueueDepth());
             break;
 
         case TCMD_MOTOR_RAW:

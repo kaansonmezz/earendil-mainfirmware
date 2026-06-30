@@ -1,0 +1,2 @@
+../Core/Src/motor_link.c:7:6:MotorLink_Init	1
+../Core/Src/motor_link.c:14:6:MotorLink_Update	3

@@ -1,0 +1,4 @@
+../Core/Src/ack_manager.c:19:6:AckManager_Init	8	static
+../Core/Src/ack_manager.c:24:6:AckManager_RegisterPending	24	static
+../Core/Src/ack_manager.c:33:13:AckManager_CheckStatus	24	static
+../Core/Src/ack_manager.c:59:6:AckManager_Update	32	static

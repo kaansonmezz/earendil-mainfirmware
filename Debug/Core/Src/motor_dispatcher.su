@@ -1,0 +1,8 @@
+../Core/Src/motor_dispatcher.c:15:6:MotorDispatcher_Init	16	static
+../Core/Src/motor_dispatcher.c:23:6:MotorDispatcher_Send	48	static
+../Core/Src/motor_dispatcher.c:75:6:MotorDispatcher_SendAll	24	static
+../Core/Src/motor_dispatcher.c:83:6:MotorDispatcher_SendRaw	120	static
+../Core/Src/motor_dispatcher.c:115:6:MotorDispatcher_SendRawToMotor	88	static
+../Core/Src/motor_dispatcher.c:128:6:MotorDispatcher_SendTunePayload	128	static
+../Core/Src/motor_dispatcher.c:184:14:MotorDispatcher_GetLink	16	static
+../Core/Src/motor_dispatcher.c:192:6:MotorDispatcher_Update	16	static

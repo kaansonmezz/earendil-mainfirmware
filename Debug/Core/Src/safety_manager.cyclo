@@ -1,0 +1,7 @@
+../Core/Src/safety_manager.c:17:20:GetMotorName	5
+../Core/Src/safety_manager.c:31:6:SafetyManager_Init	2
+../Core/Src/safety_manager.c:41:6:SafetyManager_Update	7
+../Core/Src/safety_manager.c:75:6:SafetyManager_NotifyRx	3
+../Core/Src/safety_manager.c:89:6:SafetyManager_IsLinkLost	2
+../Core/Src/safety_manager.c:98:6:SafetyManager_EnterDisarm	1
+../Core/Src/safety_manager.c:119:6:SafetyManager_LeaveDisarm	1

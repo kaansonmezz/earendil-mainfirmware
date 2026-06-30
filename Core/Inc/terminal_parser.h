@@ -50,7 +50,8 @@ typedef enum
     TCMD_OP_MODE,       /* mode disarm / mode manual / mode auto / mode autonomous */
     TCMD_MOTION,        /* f/b/r/l/fd/bd/rd/ld + value */
     TCMD_MOTOR_RAW,     /* FL/FR/RL/RR <text> : raw text to one motor only */
-    TCMD_MOTOR_TUNE     /* FL/FR/RL/RR/ALL <tuning command> : validated tuning */
+    TCMD_MOTOR_TUNE,    /* FL/FR/RL/RR/ALL <tuning command> : validated tuning */
+    TCMD_TERMSTAT       /* termstat : terminal RX queue diagnostics */
 } TerminalCommandType_t;
 
 /* ── Parse result ────────────────────────────────────────────────────────── */

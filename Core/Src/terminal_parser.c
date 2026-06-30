@@ -442,6 +442,13 @@ bool TerminalParser_Parse(const char *line, TerminalCommand_t *outResult)
         return true;
     }
 
+    /* ── 5b. termstat (terminal RX queue diagnostics) ───────────────── */
+    if (strcmp(buf, "termstat") == 0)
+    {
+        outResult->type = TCMD_TERMSTAT;
+        return true;
+    }
+
     /* ── 6. m speed (control mode) ──────────────────────────────────── */
     if (strcmp(buf, "m speed") == 0)
     {

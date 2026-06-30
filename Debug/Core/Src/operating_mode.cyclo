@@ -1,0 +1,5 @@
+../Core/Src/operating_mode.c:9:6:OperatingMode_Init	1
+../Core/Src/operating_mode.c:15:6:OperatingMode_Set	4
+../Core/Src/operating_mode.c:27:13:OperatingMode_Get	1
+../Core/Src/operating_mode.c:32:6:OperatingMode_IsDisarm	1
+../Core/Src/operating_mode.c:37:13:OperatingMode_ToString	5

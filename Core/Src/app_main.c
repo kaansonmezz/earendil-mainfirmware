@@ -18,6 +18,9 @@
 /* ── Private state ────────────────────────────────────────────────────────── */
 static TerminalCommand_t s_parsedCmd;
 
+#define TERMINAL_MAX_LINES_PER_UPDATE 16U
+static char s_termLine[TERMINAL_RX_BUF_SIZE];
+
 /* ── Public functions ─────────────────────────────────────────────────────── */
 
 void App_Init(void)
@@ -46,19 +49,24 @@ void App_Init(void)
 
 void App_Update(void)
 {
-    /* ── Terminal command processing ─────────────────────────────────── */
-    if (TerminalIf_LineReady())
+    /* ── Terminal command processing ───────────────────────────────────
+     * Drain all queued terminal lines each loop iteration so a GUI burst
+     * (e.g. 7 tuning commands) is fully processed in order without loss. */
+    uint8_t processed = 0U;
+    while (processed < TERMINAL_MAX_LINES_PER_UPDATE &&
+           TerminalIf_GetLine(s_termLine, sizeof(s_termLine)))
     {
-        const char *line = TerminalIf_GetLine();
-        Logger_Log(LOG_INFO, "CMD: %s", line);
+        processed++;
 
-        if (TerminalParser_Parse(line, &s_parsedCmd))
+        Logger_Log(LOG_INFO, "CMD: %s", s_termLine);
+
+        if (TerminalParser_Parse(s_termLine, &s_parsedCmd))
         {
             CommandHandler_Handle(&s_parsedCmd);
         }
         else
         {
-            Logger_Log(LOG_ERROR, "Unknown command: %s", line);
+            Logger_Log(LOG_ERROR, "Unknown command: %s", s_termLine);
         }
     }
 
