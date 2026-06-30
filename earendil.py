@@ -579,6 +579,7 @@ class EarendilControlGui(QMainWindow):
         # background logo).  Done last so all widgets exist before re-styling.
         self._apply_theme()
 
+        self._refresh_ports()
         self._log_info("Ready. Connect to rover to begin.")
 
     # ══════════════════════════════════════════════════════════════════════
@@ -620,7 +621,6 @@ class EarendilControlGui(QMainWindow):
         self._lbl_status.setFixedWidth(120)
         lay.addWidget(self._lbl_status)
 
-        self._refresh_ports()
         return grp
 
     def _build_rover_status_group(self) -> QGroupBox:
