@@ -112,13 +112,57 @@ bool MotorDispatcher_SendRaw(const char *msg)
     return allOk;
 }
 
+static bool FlipRawDirection(const char *input, char *output, size_t outputSize)
+{
+    if (input == NULL || output == NULL || outputSize == 0)
+        return false;
+
+    /* "fXXX" <-> "bXXX" */
+    if (input[0] == 'f' || input[0] == 'F')
+    {
+        snprintf(output, outputSize, "b%s", input + 1);
+        return true;
+    }
+    if (input[0] == 'b' || input[0] == 'B')
+    {
+        snprintf(output, outputSize, "f%s", input + 1);
+        return true;
+    }
+
+    /* "rpm XXX" <-> "rpm -XXX" */
+    if (strncmp(input, "rpm ", 4) == 0)
+    {
+        const char *val = input + 4;
+        if (val[0] == '-')
+            snprintf(output, outputSize, "rpm %s", val + 1);
+        else
+            snprintf(output, outputSize, "rpm -%s", val);
+        return true;
+    }
+
+    return false;
+}
+
 bool MotorDispatcher_SendRawToMotor(MotorId_t motor, const char *msg)
 {
     if (msg == NULL || motor >= MOTOR_COUNT)
         return false;
 
+    const char *effectiveMsg = msg;
+    char flipped[64];
+
+    if (motor == MOTOR_FR || motor == MOTOR_RR)
+    {
+        if (FlipRawDirection(msg, flipped, sizeof(flipped)))
+        {
+            Logger_Log(LOG_INFO, "[POLARITY][%s] raw '%s' -> '%s'",
+                       (motor == MOTOR_FR) ? "FR" : "RR", msg, flipped);
+            effectiveMsg = flipped;
+        }
+    }
+
     char frame[64];
-    int len = snprintf(frame, sizeof(frame), "%s\r\n", msg);
+    int len = snprintf(frame, sizeof(frame), "%s\r\n", effectiveMsg);
     if (len <= 0 || (uint16_t)len >= sizeof(frame))
         return false;
 

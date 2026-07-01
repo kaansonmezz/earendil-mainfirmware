@@ -4,4 +4,4 @@
 ../Core/Src/terminal_parser.c:75:13:NextToken	6
 ../Core/Src/terminal_parser.c:100:13:ParseTuneCommand	84
 ../Core/Src/terminal_parser.c:360:13:FillMotion	2
-../Core/Src/terminal_parser.c:383:6:TerminalParser_Parse	73
+../Core/Src/terminal_parser.c:383:6:TerminalParser_Parse	74

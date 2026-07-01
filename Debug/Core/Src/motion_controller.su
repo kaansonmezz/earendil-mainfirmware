@@ -2,6 +2,7 @@
 ../Core/Src/motion_controller.c:14:13:SetAllMotors	24	static
 ../Core/Src/motion_controller.c:20:13:SetMotorCmd	16	static
 ../Core/Src/motion_controller.c:26:6:MotionController_Init	8	static
-../Core/Src/motion_controller.c:31:6:MotionController_Execute	24	static
-../Core/Src/motion_controller.c:72:6:MotionController_Stop	8	static
-../Core/Src/motion_controller.c:79:6:MotionController_DisarmSafe	8	static
+../Core/Src/motion_controller.c:34:13:ApplyMotorPolarity	32	static
+../Core/Src/motion_controller.c:56:6:MotionController_Execute	24	static
+../Core/Src/motion_controller.c:98:6:MotionController_Stop	8	static
+../Core/Src/motion_controller.c:105:6:MotionController_DisarmSafe	8	static

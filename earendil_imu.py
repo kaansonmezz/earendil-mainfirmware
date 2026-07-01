@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Earendil - Rover Control GUI for STM32H723ZG Main Controller
+Earendil — Rover Control GUI for STM32H723ZG Main Controller
 ============================================================
 Single-file PySide6 + pyserial application.
 Communicates with the H7 firmware over USART3 / ST-LINK VCP.
@@ -25,7 +25,7 @@ import time
 import threading
 from collections import deque
 
-# -- Dependency check -------------------------------------------------------
+# ── Dependency check ───────────────────────────────────────────────────────
 _missing = []
 try:
     from PySide6.QtWidgets import (
@@ -33,7 +33,6 @@ try:
         QLabel, QPushButton, QComboBox, QLineEdit,
         QGroupBox, QTextEdit, QTableWidget, QTableWidgetItem,
         QDialog, QHeaderView, QSplitter, QFrame, QSizePolicy,
-        QFormLayout, QSpinBox, QDoubleSpinBox, QGridLayout,
     )
     from PySide6.QtCore import Qt, QTimer, Signal, QObject, QThread, QEvent
     from PySide6.QtGui import (
@@ -56,10 +55,10 @@ if _missing:
     sys.exit(1)
 
 
-# ============================================================================
+# ════════════════════════════════════════════════════════════════════════════
 #  Background Logo Watermark
 #  Paints a low-opacity centered logo behind the GUI content in paintEvent().
-# ============================================================================
+# ════════════════════════════════════════════════════════════════════════════
 
 class LogoBackgroundWidget(QWidget):
     """Central widget that paints a transparent logo watermark.
@@ -142,9 +141,9 @@ class LogoBackgroundWidget(QWidget):
         painter.drawPixmap(x, y, scaled)
 
 
-# ============================================================================
+# ════════════════════════════════════════════════════════════════════════════
 #  Serial Reader Thread
-# ============================================================================
+# ════════════════════════════════════════════════════════════════════════════
 
 class SerialReaderThread(QThread):
     """Background thread that reads lines from the serial port."""
@@ -189,14 +188,14 @@ class SerialReaderThread(QThread):
         self.wait(2000)
 
 
-# ============================================================================
+# ════════════════════════════════════════════════════════════════════════════
 #  H7 UART Error Log Parsing
 #  Matches firmware output from Core/Src/motor_uart_dma.c:
 #    [ERROR] <UART> UART error code: 0x00000004
 #    [ERROR] <UART> UART error still unresolved: 0x00000004
 #    [ERROR] <UART> error: <CODE> - <Description>
 #    [INFO]  <UART> RX recovered after UART error
-# ============================================================================
+# ════════════════════════════════════════════════════════════════════════════
 _RE_UART_ERROR_CODE = re.compile(
     r"^\[ERROR\]\s+(USART2|UART4|UART5|UART7)\s+"
     r"UART error (?:code|still unresolved):\s+(0x[0-9A-Fa-f]+)$"
@@ -208,18 +207,7 @@ _RE_UART_RECOVERED = re.compile(
     r"^\[INFO\]\s+(USART2|UART4|UART5|UART7)\s+RX recovered after UART error$"
 )
 
-# -- F411 motor telemetry patterns ------------------------------------------
-#   New H7 format:  [TEL][FL] RPM:60,T:0,...
-#   Legacy format:  [INFO] [USART2_RX] RPM:60,T:0,...
-# Both may have a leading [INFO] prefix from the H7 logger.
-_RE_MOTOR_TEL_TAGGED = re.compile(
-    r"(?:\[INFO\]\s*)?\[TEL\]\[(FL|FR|RL|RR)\]\s+(RPM:.*)$"
-)
-_RE_MOTOR_TEL_UART = re.compile(
-    r"(?:\[INFO\]\s*)?\[(USART2_RX|UART4_RX|UART5_RX|UART7_RX)\]\s+(RPM:.*)$"
-)
-
-# -- Operating mode confirmation from H7 firmware (command_handler.c) ------
+# ── Operating mode confirmation from H7 firmware (command_handler.c) ──────
 #   The firmware logger (logger.c) prepends a level tag to every line, so
 #   the actual serial output looks like:
 #       [INFO] [MODE] DISARM active, motion commands locked
@@ -230,400 +218,14 @@ _RE_OP_MODE_CONFIRM = re.compile(
     r"\[MODE\]\s+(DISARM|MANUAL|AUTONOMOUS)\s+active\b"
 )
 
-
-# ============================================================================
-#  F411 Motor Tuning Settings Dialog
-#  Placeholder / planning UI for configuring F411 motor parameters from the GUI.
-#  Commands are built by the main window's centralized placeholder builder
-#  (EarendilControlGui.build_f411_tuning_commands) and routed through the
-#  existing _send_cmd() serial path, so logging / disconnected handling stay
-#  consistent with the rest of the GUI.  Nothing here assumes the final H7/F411
-#  raw motor forwarding protocol is complete - the format lives in one place:
-#  build_f411_tuning_commands().
-# ============================================================================
-
-class MotorSettingsDialog(QDialog):
-    """F411 Motor Tuning Settings dialog.
-
-    Opened from the Motor State section's *Settings* button.  This is a
-    placeholder / planning UI: the operator tweaks 8 slots of Base PWM /
-    Boost PWM / Boost MS, Ramp Up/Down, Kp/Ki, Telemetry period, and an
-    optional custom command, then clicks one of the per-motor send buttons.
-
-    Commands are NOT hardcoded in callbacks: collect_f411_tuning_settings()
-    reads the form, EarendilControlGui.build_f411_tuning_commands() builds
-    the placeholder protocol lines, and send_f411_tuning_command() routes
-    them through the existing _send_cmd() serial path.  Update those
-    centralized functions when the real H7 raw motor forwarding protocol
-    and F411 firmware parser are finalized.
-    """
-
-    NUM_SLOTS = 8
-    MOTOR_TAGS = ("FL", "FR", "RL", "RR")
-
-    def __init__(self, main_gui: "EarendilControlGui", parent=None):
-        super().__init__(parent)
-        self._gui = main_gui
-        self.setWindowTitle("F411 Motor Tuning Settings")
-        # Wider than the previous dialog so the 8-row tuning table reads well.
-        self.setMinimumWidth(560)
-        self._apply_theme_style()
-
-        root = QVBoxLayout(self)
-        root.setSpacing(10)
-        root.setContentsMargins(12, 12, 12, 12)
-
-        # -- 8-row tuning table: # | Base PWM | Boost PWM -------------
-        # Note: Boost MS is a single global field (in the form below), NOT
-        # one per slot.  See the layout comment in _build_form_group().
-        root.addWidget(self._build_tuning_table_group())
-
-        # -- Global settings: Boost MS / Kick Duty / Kick MS / Ramp /
-        #     PI / Telemetry -------------------------------------------
-        root.addWidget(self._build_form_group())
-
-        # -- Optional custom command ------------------------------------
-        root.addWidget(self._build_custom_group())
-
-        # -- Send buttons (per-motor direct send + All) ----------------
-        root.addLayout(self._build_send_row())
-
-        # -- Read buttons (placeholder) -------------------------------
-        root.addLayout(self._build_read_row())
-
-        # -- Reset / Close ----------------------------------------------
-        root.addLayout(self._build_utility_row())
-
-        # Default values used by Reset Fields and dialog initialisation.
-        self._defaults = {
-            "base":      ["300", "500", "800", "1200", "1700", "2200", "2800", "3500"],
-            "boost":     ["1300", "1600", "1700", "2000", "2600", "3200", "3800", "4000"],
-            "boostms":   "150",
-            "kick_duty": "960",
-            "kick_ms":   "50",
-            "ramp_up":   "150",
-            "ramp_down": "150",
-            "kp":        "10",
-            "ki":        "10",
-            "telper":    "1",
-            "custom":    "",
-        }
-        self._reset_fields(log=False)
-
-    # ======================================================================
-    #  UI builders
-    # ======================================================================
-
-    def _build_tuning_table_group(self) -> QGroupBox:
-        """Horizontal tuning table: slots 1-8 left-to-right.
-
-        Layout (3 rows x 9 columns):
-
-            Slot:        1      2      3    ...    8
-            Base PWM:  [  ]   [  ]   [  ]  ...  [  ]
-            Boost PWM: [  ]   [  ]   [  ]  ...  [  ]
-
-        Boost MS / Kick Duty / Kick MS are NOT here - they are single
-        global fields in _build_form_group().
-        """
-        grp = QGroupBox("Tuning Slots")
-        lay = QGridLayout(grp)
-        lay.setSpacing(6)
-        lay.setContentsMargins(10, 14, 10, 10)
-
-        # Row 0 - "Slot:" label + slot numbers 1..8
-        lay.addWidget(QLabel("Slot:"), 0, 0)
-        for i in range(self.NUM_SLOTS):
-            lbl = QLabel(str(i + 1))
-            lbl.setAlignment(Qt.AlignCenter)
-            lay.addWidget(lbl, 0, i + 1)
-
-        # Row 1 - "Base PWM:" label + 8 input fields
-        lay.addWidget(QLabel("Base PWM:"), 1, 0)
-        self._base_edits = []
-        for i in range(self.NUM_SLOTS):
-            edit = QLineEdit()
-            edit.setPlaceholderText("0")
-            edit.setFixedWidth(60)
-            edit.setAlignment(Qt.AlignCenter)
-            lay.addWidget(edit, 1, i + 1)
-            self._base_edits.append(edit)
-
-        # Row 2 - "Boost PWM:" label + 8 input fields
-        lay.addWidget(QLabel("Boost PWM:"), 2, 0)
-        self._boost_edits = []
-        for i in range(self.NUM_SLOTS):
-            edit = QLineEdit()
-            edit.setPlaceholderText("0")
-            edit.setFixedWidth(60)
-            edit.setAlignment(Qt.AlignCenter)
-            lay.addWidget(edit, 2, i + 1)
-            self._boost_edits.append(edit)
-
-        return grp
-
-    def _build_form_group(self) -> QGroupBox:
-        """Global tuning form fields.
-
-        Single Boost MS field (shared across all slots), Kick Duty, Kick MS,
-        Ramp Up / Ramp Down, Kp / Ki, Telemetry Period - all QLineEdit only
-        (no spinbox arrows).  Values are raw text so the placeholder builder
-        can later emit any final protocol format freely.
-        """
-        grp = QGroupBox("Boost / Kick / Ramp / PI / Telemetry")
-        form = QFormLayout(grp)
-        form.setSpacing(6)
-        form.setContentsMargins(10, 14, 10, 10)
-
-        self._boostms_edit  = QLineEdit(); self._boostms_edit.setPlaceholderText("0")
-        self._kick_duty_edit = QLineEdit(); self._kick_duty_edit.setPlaceholderText("0")
-        self._kick_ms_edit  = QLineEdit(); self._kick_ms_edit.setPlaceholderText("0")
-        self._ramp_up_edit  = QLineEdit(); self._ramp_up_edit.setPlaceholderText("0")
-        self._ramp_dn_edit  = QLineEdit(); self._ramp_dn_edit.setPlaceholderText("0")
-        self._kp_edit       = QLineEdit(); self._kp_edit.setPlaceholderText("0")
-        self._ki_edit       = QLineEdit(); self._ki_edit.setPlaceholderText("0")
-        self._telper_edit   = QLineEdit(); self._telper_edit.setPlaceholderText("100")
-
-        form.addRow("Boost MS:",         self._boostms_edit)
-        form.addRow("Kick Duty:",         self._kick_duty_edit)
-        form.addRow("Kick MS:",           self._kick_ms_edit)
-        form.addRow("Ramp Up:",          self._ramp_up_edit)
-        form.addRow("Ramp Down:",         self._ramp_dn_edit)
-        form.addRow("Kp:",                self._kp_edit)
-        form.addRow("Ki:",                self._ki_edit)
-        form.addRow("Telemetry Period:", self._telper_edit)
-        return grp
-
-    def _build_custom_group(self) -> QGroupBox:
-        """Optional custom command text box."""
-        grp = QGroupBox("Custom Command")
-        lay = QHBoxLayout(grp)
-        lay.setContentsMargins(10, 14, 10, 10)
-        self._custom_edit = QLineEdit()
-        self._custom_edit.setPlaceholderText(
-            "Free-text command line (appended after the motor tag)"
-        )
-        lay.addWidget(self._custom_edit, 1)
-        return grp
-
-    def _build_send_row(self) -> QHBoxLayout:
-        """Per-motor direct send buttons + Send to All."""
-        row = QHBoxLayout()
-        row.setSpacing(6)
-
-        self._send_buttons: dict[str, QPushButton] = {}
-        for motor in self.MOTOR_TAGS + ("All",):
-            btn = QPushButton(f"Send to {motor}")
-            btn.clicked.connect(lambda _=False, m=motor: self._on_send_to(motor))
-            row.addWidget(btn, 1)
-            self._send_buttons[motor] = btn
-        return row
-
-    def _build_utility_row(self) -> QHBoxLayout:
-        """Reset Fields + Close."""
-        row = QHBoxLayout()
-        row.setSpacing(6)
-
-        self._btn_reset = QPushButton("Reset Fields")
-        self._btn_reset.clicked.connect(self._reset_fields)
-        row.addWidget(self._btn_reset, 1)
-
-        self._btn_close = QPushButton("Close")
-        self._btn_close.clicked.connect(self.accept)
-        row.addWidget(self._btn_close, 1)
-        return row
-
-    def _build_read_row(self) -> QHBoxLayout:
-        """Placeholder Read buttons - one per motor (no Read All)."""
-        row = QHBoxLayout()
-        row.setSpacing(6)
-        for motor in self.MOTOR_TAGS:
-            btn = QPushButton(f"Read {motor}")
-            row.addWidget(btn, 1)
-        return row
-
-    # ======================================================================
-    #  Theme styling
-    # ======================================================================
-
-    def _apply_theme_style(self):
-        """Style the dialog using the active main-window palette so the popup
-        stays visually consistent with the rest of the GUI (dark or light).
-        Colors are pulled from self._gui._colors(); no hardcoded theme colors.
-        """
-        c = self._gui._colors()
-        self.setStyleSheet(f"""
-            QDialog {{
-                background-color: {c['bg_main']};
-                color: {c['text']};
-                font-size: 13px;
-                font-weight: {c['font_weight']};
-            }}
-            QLabel {{
-                color: {c['text']};
-            }}
-            QGroupBox {{
-                background-color: {c['bg_panel']};
-                border: 1px solid {c['border']};
-                border-radius: 6px;
-                margin-top: 10px;
-                padding-top: 14px;
-                color: {c['text']};
-                font-weight: bold;
-            }}
-            QGroupBox::title {{
-                subcontrol-origin: margin;
-                left: 12px;
-                padding: 0 6px;
-                color: {c['accent_gold']};
-            }}
-            QPushButton {{
-                background-color: {c['bg_input']};
-                border: 1px solid {c['accent_gold']};
-                border-radius: 6px;
-                padding: 6px 14px;
-                color: {c['accent_gold']};
-                font-weight: bold;
-                min-height: 28px;
-            }}
-            QPushButton:hover {{
-                background-color: {c['selection_bg']};
-            }}
-            QPushButton:pressed {{
-                background-color: {c['pressed_bg']};
-            }}
-            QLineEdit {{
-                background-color: {c['bg_input']};
-                border: 1px solid {c['border']};
-                border-radius: 4px;
-                padding: 4px 8px;
-                color: {c['text']};
-                font-weight: {c['font_weight']};
-            }}
-        """)
-
-    # ======================================================================
-    #  Helpers
-    # ======================================================================
-
-    def collect_f411_tuning_settings(self) -> dict:
-        """Read the entire dialog form into a plain dict.
-
-        Returned dict shape (all values are raw strings typed by the operator
-        - no up/down spinbox logic):
-            {
-                "base":      [str]*8,  # Base PWM 1..8
-                "boost":     [str]*8,  # Boost PWM 1..8
-                "boostms":   str,      # single global Boost MS field
-                "kick_duty": str,
-                "kick_ms":   str,
-                "ramp_up":   str, "ramp_down": str,
-                "kp":        str, "ki": str,
-                "telper":    str,
-                "custom":    str,
-            }
-        Keeping everything as strings leaves the placeholder builder free to
-        emit any final protocol format (integers, floats, hex...) when the
-        real H7/F411 parser is wired.  Boost MS is a single global value,
-        not one per tuning slot.
-        """
-        return {
-            "base":      [e.text().strip() for e in self._base_edits],
-            "boost":     [e.text().strip() for e in self._boost_edits],
-            "boostms":   self._boostms_edit.text().strip(),
-            "kick_duty": self._kick_duty_edit.text().strip(),
-            "kick_ms":   self._kick_ms_edit.text().strip(),
-            "ramp_up":   self._ramp_up_edit.text().strip(),
-            "ramp_down": self._ramp_dn_edit.text().strip(),
-            "kp":        self._kp_edit.text().strip(),
-            "ki":        self._ki_edit.text().strip(),
-            "telper":    self._telper_edit.text().strip(),
-            "custom":    self._custom_edit.text().strip(),
-        }
-
-    def _resolve_motors(self, key: str) -> list:
-        """Map a send-button key ("FL"/"FR"/"RL"/"RR"/"All") to the motor
-        tag(s) used by the H7 terminal.  "All" now maps to the single
-        tag "ALL" so the H7 firmware broadcasts once instead of four
-        separate per-motor sends."""
-        if key == "All":
-            return ["ALL"]
-        return [key] if key in self.MOTOR_TAGS else []
-
-    def _reset_fields(self, log: bool = True):
-        """Restore all text boxes to the default values."""
-        d = self._defaults
-        for i in range(self.NUM_SLOTS):
-            self._base_edits[i].setText(d["base"][i])
-            self._boost_edits[i].setText(d["boost"][i])
-        self._boostms_edit.setText(d["boostms"])
-        self._kick_duty_edit.setText(d["kick_duty"])
-        self._kick_ms_edit.setText(d["kick_ms"])
-        self._ramp_up_edit.setText(d["ramp_up"])
-        self._ramp_dn_edit.setText(d["ramp_down"])
-        self._kp_edit.setText(d["kp"])
-        self._ki_edit.setText(d["ki"])
-        self._telper_edit.setText(d["telper"])
-        self._custom_edit.clear()
-        if log:
-            self._gui._log_info("[F411-TUNE] Settings dialog fields reset to defaults")
-
-    # ======================================================================
-    #  Send handlers - single dispatch path for every send button
-    # ======================================================================
-
-    def _on_send_to(self, target: str):
-        """Send the whole form (tuning slots + ramp + PI + telper + custom)
-        to one target ("FL"/"FR"/"RL"/"RR"/"All") as a paced sequence.
-
-        "All" generates ALL commands; individual targets generate per-motor
-        commands.  All command building goes through the centralized
-        build_f411_tuning_commands() helper.
-
-        The sequence is: stop -> tuning commands -> spstat, sent one-by-one
-        via QTimer pacing (TUNING_SEND_INTERVAL_MS) to avoid H7 terminal
-        RX / motor TX FIFO overflow.  Send buttons are disabled during the
-        sequence and re-enabled on completion.
-        """
-        motors = self._resolve_motors(target)
-        if not motors:
-            self._gui._log_warn(f"[F411-TUNE] Unknown send target {target!r}")
-            return
-
-        settings = self.collect_f411_tuning_settings()
-
-        all_cmds: list[str] = []
-        for motor in motors:
-            # Stop before tuning so F411 accepts config changes.
-            if motor == "ALL":
-                all_cmds.append("stop")
-            else:
-                all_cmds.append(f"{motor} stop")
-
-            # Tuning commands (base/boost/kickduty/kickms/ramp/pi/telper/custom).
-            cmds = self._gui.build_f411_tuning_commands(motor, settings)
-            all_cmds.extend(cmds)
-
-            # spstat after tuning so the operator can verify F411 received.
-            if motor == "ALL":
-                all_cmds.extend(["FL spstat", "FR spstat", "RL spstat", "RR spstat"])
-            else:
-                all_cmds.append(f"{motor} spstat")
-
-        self._gui.enqueue_f411_tuning_sequence(all_cmds, dialog=self)
-
-    def _set_send_buttons_enabled(self, enabled: bool):
-        """Enable/disable all tuning send buttons (called by the GUI
-        during a paced tuning sequence)."""
-        for btn in self._send_buttons.values():
-            btn.setEnabled(enabled)
-        if hasattr(self, "_btn_reset"):
-            self._btn_reset.setEnabled(enabled)
+_RE_IMU_DATA = re.compile(
+    r"^\[IMU\]\s+Roll:\s+([-\d.]+)\s+Pitch:\s+([-\d.]+)\s+Yaw:\s+([-\d.]+)$"
+)
 
 
-# ============================================================================
+# ════════════════════════════════════════════════════════════════════════════
 #  Main GUI
-# ============================================================================
+# ════════════════════════════════════════════════════════════════════════════
 
 class EarendilControlGui(QMainWindow):
     """
@@ -631,7 +233,7 @@ class EarendilControlGui(QMainWindow):
     Left side: control panels.  Right side: serial console.
     """
 
-    # -- Theme palettes -------------------------------------------------------
+    # ── Theme palettes ───────────────────────────────────────────────────────
     #  Semantic color keys used everywhere instead of raw hex.  The dark
     #  palette reproduces the original gold/dark theme exactly.  The light
     #  palette is a clean white/grey alternative that keeps the semantic
@@ -806,22 +408,21 @@ class EarendilControlGui(QMainWindow):
         }}
         """
 
-    # -- Constants ----------------------------------------------------------
+    # ── Constants ──────────────────────────────────────────────────────────
     REPEAT_INTERVAL_MS = 500
-    TUNING_SEND_INTERVAL_MS = 100
     # How long the GUI waits for an H7 confirmation of an operating-mode
     # command before warning that the mode change was not confirmed.
     OP_MODE_CONFIRM_TIMEOUT_MS = 3000
     DEFAULT_RPM = 100
     DEFAULT_PWM = 100
     RPM_MAX = 200
-    PWM_MAX = 4000
+    PWM_MAX = 255
     VALUE_STEP = 5
 
-    # -- Motor table row index ---------------------------------------------
+    # ── Motor table row index ─────────────────────────────────────────────
     MOTOR_ROW = {"FL": 0, "FR": 1, "RL": 2, "RR": 3}
 
-    # -- UART -> motor mapping (must match H7 firmware) ---------------------
+    # ── UART → motor mapping (must match H7 firmware) ─────────────────────
     #   app_config.h        : huart2=FL, huart4=FR, huart7=RL, huart5=RR
     #   motor_uart_dma.c    : USART2=FL, UART4=FR,  UART7=RL,  UART5=RR
     #   motor_tx_dma.c      : same mapping
@@ -835,47 +436,7 @@ class EarendilControlGui(QMainWindow):
     # Recognized UART error code prefixes (HAL UART error flags)
     UART_ERROR_CODES = {"FE", "NE", "ORE", "PE", "DMA", "RTO"}
 
-    # -- Motor table column indices -----------------------------------------
-    MOTOR_COL = {
-        "motor": 0,
-        "current_rpm": 1,
-        "target_rpm": 2,
-        "drive_duty": 3,
-        "direction": 4,
-        "motor_state": 5,
-        "control_mode": 6,
-        "brake_status": 7,
-        "fault_code": 8,
-        "hall_sensor": 9,
-        "target_pwm": 10,
-        "applied_pwm": 11,
-        "dropped_commands": 12,
-        "received_uart_bytes": 13,
-        "error": 14,
-        "link": 15,
-    }
-    MOTOR_COL_HEADERS = [
-        "Motor", "Current RPM", "Target RPM", "Drive Duty",
-        "Direction", "Motor State", "Control Mode", "Brake Status",
-        "Fault Code", "Hall Sensor", "Target PWM", "Applied PWM",
-        "Dropped Commands", "Received UART Bytes", "Error", "Link",
-    ]
-
-    # UART RX suffix -> motor tag (for legacy [USART2_RX] format)
-    UART_RX_TO_MOTOR = {
-        "USART2_RX": "FL",
-        "UART4_RX":  "FR",
-        "UART7_RX":  "RL",
-        "UART5_RX":  "RR",
-    }
-
-    # F411 telemetry display translations
-    _APP_PH_MAP = {"0": "Stopped", "1": "Running", "2": "Brake", "3": "Idle", "4": "Error"}
-    _DIR_MAP = {"F": "Forward", "R": "Reverse", "N": "Neutral / No Direction"}
-    _SP_MAP = {"0": "Duty/PWM Mode", "1": "RPM Control Mode"}
-    _BRAKE_MAP = {"0": "Brake Off", "1": "Brake Active"}
-
-    # -- Operating mode (DISARM / MANUAL / AUTONOMOUS) ---------------------
+    # ── Operating mode (DISARM / MANUAL / AUTONOMOUS) ─────────────────────
     #   drive/control mode (RPM/DUTY) is a separate concept handled by _set_mode.
     #   Commands are sent over the same H7 terminal serial path as other cmds.
     OPERATING_MODES = {
@@ -904,7 +465,7 @@ class EarendilControlGui(QMainWindow):
             "led": "#3CB371",
         },
     }
-    # Order of LEDs left->right: red, yellow, green
+    # Order of LEDs left→right: red, yellow, green
     OPERATING_MODE_LED_KEYS = ("disarm", "manual", "auto")
 
     # Movement key priority: most-recently-pressed wins
@@ -917,10 +478,10 @@ class EarendilControlGui(QMainWindow):
 
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("Earendil - Rover Control")
+        self.setWindowTitle("Earendil — Rover Control")
         self.setMinimumSize(1100, 650)
 
-        # -- State ----------------------------------------------------------
+        # ── State ──────────────────────────────────────────────────────────
         self.current_theme = "dark"            # "dark" or "light"
 
         self.ser: serial.Serial | None = None
@@ -928,10 +489,8 @@ class EarendilControlGui(QMainWindow):
         self.connected = False
 
         self.mode = "RPM"               # "RPM" or "DUTY"
-        self.fb_rpm = self.DEFAULT_RPM
-        self.rot_rpm = self.DEFAULT_RPM
-        self.fb_pwm = self.DEFAULT_PWM
-        self.rot_pwm = self.DEFAULT_PWM
+        self.current_rpm = self.DEFAULT_RPM
+        self.current_pwm = self.DEFAULT_PWM
 
         self._operating_mode = "disarm"          # confirmed mode (H7 is source of truth)
         self._pending_mode: str | None = None   # mode requested by user, awaiting H7 confirm
@@ -942,27 +501,13 @@ class EarendilControlGui(QMainWindow):
         self._active_modifier: str | None = None   # "Shift" or "Ctrl" if held
         self._keys_held: set[str] = set()          # ALL held keys (prevents duplicates)
 
-        # -- Motor UART error tracking -------------------------------------
-        # motor -> current UART error text (empty string = no active UART error)
-        self._motor_uart_error_text: dict[str, str] = {"FL": "", "FR": "", "RL": "", "RR": ""}
+        # ── Motor UART error tracking ─────────────────────────────────────
+        # motor -> current text shown in the Error column (col 4)
+        self._motor_error_text: dict[str, str] = {"FL": "", "FR": "", "RL": "", "RR": ""}
         # uart -> decoded error parts accumulated within one report cycle
         self._uart_report_decoded: dict[str, list[str]] = {}
-        # motor -> F411 fault code string ("0" = no fault)
-        self._motor_fault_code: dict[str, str] = {"FL": "0", "FR": "0", "RL": "0", "RR": "0"}
-        # motor -> last telemetry values dict (key -> display string)
-        self._motor_telemetry: dict[str, dict[str, str]] = {
-            m: {} for m in ("FL", "FR", "RL", "RR")
-        }
 
-        # -- F411 tuning paced-send state --------------------------------
-        self._tuning_send_queue: deque[str] = deque()
-        self._tuning_dialog_ref = None
-        self._tuning_send_timer = QTimer(self)
-        self._tuning_send_timer.setInterval(self.TUNING_SEND_INTERVAL_MS)
-        self._tuning_send_timer.timeout.connect(
-            self._send_next_f411_tuning_command)
-
-        # -- Build UI -------------------------------------------------------
+        # ── Build UI ───────────────────────────────────────────────────────
         self._central = LogoBackgroundWidget("earendil_logo.png", opacity=1.0)
         central = self._central
         self.setCentralWidget(central)
@@ -980,7 +525,7 @@ class EarendilControlGui(QMainWindow):
         left_layout.setContentsMargins(0, 0, 0, 0)
         left_layout.setSpacing(8)
 
-        # -- Top row: Serial Connection (left) + Rover Status (right) ---
+        # ── Top row: Serial Connection (left) + Rover Status (right) ───
         top_row = QHBoxLayout()
         top_row.setContentsMargins(0, 0, 0, 0)
         top_row.setSpacing(8)
@@ -989,7 +534,7 @@ class EarendilControlGui(QMainWindow):
 
         left_layout.addLayout(top_row)
 
-        # -- Mode / Value  (left)  +  Operating Mode (right)  in one row --
+        # ── Mode / Value  (left)  +  Operating Mode (right)  in one row ──
         mode_op_row = QHBoxLayout()
         mode_op_row.setContentsMargins(0, 0, 0, 0)
         mode_op_row.setSpacing(8)
@@ -1003,17 +548,17 @@ class EarendilControlGui(QMainWindow):
 
         splitter.addWidget(left_panel)
 
-        # Right panel - console
+        # Right panel — console
         splitter.addWidget(self._build_console_group())
         splitter.setStretchFactor(0, 3)
         splitter.setStretchFactor(1, 2)
 
-        # -- Repeat timer ---------------------------------------------------
+        # ── Repeat timer ───────────────────────────────────────────────────
         self._repeat_timer = QTimer(self)
         self._repeat_timer.setInterval(self.REPEAT_INTERVAL_MS)
         self._repeat_timer.timeout.connect(self._repeat_movement)
 
-        # -- Operating-mode confirmation timeout ---------------------------
+        # ── Operating-mode confirmation timeout ───────────────────────────
         # Started when a mode button sends a command; if the H7 does not
         # reply with a `[MODE] ... active` line in time, we warn and keep
         # the previously confirmed mode (no optimistic UI change).
@@ -1034,11 +579,12 @@ class EarendilControlGui(QMainWindow):
         # background logo).  Done last so all widgets exist before re-styling.
         self._apply_theme()
 
+        self._refresh_ports()
         self._log_info("Ready. Connect to rover to begin.")
 
-    # ======================================================================
+    # ══════════════════════════════════════════════════════════════════════
     #  UI Builders
-    # ======================================================================
+    # ══════════════════════════════════════════════════════════════════════
 
     def _build_connection_group(self) -> QGroupBox:
         grp = QGroupBox("Serial Connection")
@@ -1070,12 +616,11 @@ class EarendilControlGui(QMainWindow):
         self._btn_connect.clicked.connect(self._toggle_connection)
         lay.addWidget(self._btn_connect)
 
-        self._lbl_status = QLabel("* Disconnected")
+        self._lbl_status = QLabel("● Disconnected")
         self._lbl_status.setStyleSheet("color: #B00020; font-weight: bold;")
         self._lbl_status.setFixedWidth(120)
         lay.addWidget(self._lbl_status)
 
-        self._refresh_ports()
         return grp
 
     def _build_rover_status_group(self) -> QGroupBox:
@@ -1103,7 +648,7 @@ class EarendilControlGui(QMainWindow):
 
         lay.addStretch()
 
-        # Theme toggle button - only changes visual theme, never sends a
+        # Theme toggle button — only changes visual theme, never sends a
         # serial command.  Text reflects the theme we will switch TO.
         self._btn_theme = QPushButton("Light Mode")
         self._btn_theme.setFixedWidth(100)
@@ -1124,25 +669,16 @@ class EarendilControlGui(QMainWindow):
         lay.addWidget(self._lbl_mode)
 
         lay.addSpacing(20)
-        self._lbl_fb_label = QLabel("FB RPM:")
-        lay.addWidget(self._lbl_fb_label)
-        self._lbl_fb_value = QLabel(str(self.fb_rpm))
-        self._lbl_fb_value.setStyleSheet(
+        self._lbl_value_label = QLabel("RPM Value:")
+        lay.addWidget(self._lbl_value_label)
+        self._lbl_value = QLabel(str(self.current_rpm))
+        self._lbl_value.setStyleSheet(
             "color: #FFD66B; font-size: 18px; font-weight: bold;"
         )
-        lay.addWidget(self._lbl_fb_value)
+        lay.addWidget(self._lbl_value)
 
         lay.addSpacing(10)
-        self._lbl_rot_label = QLabel("ROT RPM:")
-        lay.addWidget(self._lbl_rot_label)
-        self._lbl_rot_value = QLabel(str(self.rot_rpm))
-        self._lbl_rot_value.setStyleSheet(
-            "color: #FFD66B; font-size: 18px; font-weight: bold;"
-        )
-        lay.addWidget(self._lbl_rot_value)
-
-        lay.addSpacing(10)
-        lay.addWidget(QLabel("Shift/Ctrl:FB +/- | Num+/Num-:ROT +/-"))
+        lay.addWidget(QLabel("Shift +5 / Ctrl -5"))
 
         lay.addStretch()
 
@@ -1173,7 +709,7 @@ class EarendilControlGui(QMainWindow):
         lay.setContentsMargins(8, 6, 8, 6)
         lay.setSpacing(8)
 
-        # -- Left: three LEDs (red / yellow / green) ----------------------
+        # ── Left: three LEDs (red / yellow / green) ──────────────────────
         leds_col = QVBoxLayout()
         leds_col.setContentsMargins(0, 0, 0, 0)
         leds_col.setSpacing(5)
@@ -1186,7 +722,7 @@ class EarendilControlGui(QMainWindow):
         leds_col.addStretch()
         lay.addLayout(leds_col)
 
-        # -- Right: status box on top, three buttons below ----------------
+        # ── Right: status box on top, three buttons below ────────────────
         right_col = QVBoxLayout()
         right_col.setContentsMargins(0, 0, 0, 0)
         right_col.setSpacing(5)
@@ -1227,41 +763,28 @@ class EarendilControlGui(QMainWindow):
         grp = QGroupBox("Motor State")
         lay = QVBoxLayout(grp)
 
-        num_cols = len(self.MOTOR_COL_HEADERS)
-        self._motor_table = QTableWidget(4, num_cols)
-        self._motor_table.setHorizontalHeaderLabels(self.MOTOR_COL_HEADERS)
+        self._motor_table = QTableWidget(4, 7)
+        self._motor_table.setHorizontalHeaderLabels(
+            ["Motor", "Mode", "PWM", "RPM", "Error", "Link", "Last RX"]
+        )
         headers = self._motor_table.horizontalHeader()
         if headers:
-            headers.setSectionResizeMode(QHeaderView.ResizeToContents)
-            headers.setSectionResizeMode(self.MOTOR_COL["motor"], QHeaderView.Stretch)
-            headers.setSectionResizeMode(self.MOTOR_COL["error"], QHeaderView.Stretch)
+            headers.setSectionResizeMode(QHeaderView.Stretch)
 
         motors = ["FL", "FR", "RL", "RR"]
         for row, name in enumerate(motors):
             self._motor_table.setItem(row, 0, QTableWidgetItem(name))
-            for col in range(1, num_cols):
+            for col in range(1, 7):
                 self._motor_table.setItem(row, col, QTableWidgetItem("--"))
 
         self._motor_table.setVerticalHeaderLabels([])
         self._motor_table.setEditTriggers(QTableWidget.NoEditTriggers)
         self._motor_table.setFocusPolicy(Qt.NoFocus)
-        self._motor_table.setMaximumHeight(200)
-        self._motor_table.setMinimumHeight(160)
+        self._motor_table.setMaximumHeight(160)
         lay.addWidget(self._motor_table)
-
-        # -- Settings button (opens F411 Motor Tuning Settings dialog) -----
-        # Right-aligned so it reads as "table -> settings" within the group.
-        btn_row = QHBoxLayout()
-        btn_row.setContentsMargins(0, 0, 0, 0)
-        btn_row.addStretch()
-
-        self._btn_motor_settings = QPushButton("Settings")
-        self._btn_motor_settings.clicked.connect(self._open_motor_settings)
-        btn_row.addWidget(self._btn_motor_settings)
-        lay.addLayout(btn_row)
         return grp
 
-    # -- 9-axis IMU placeholder --------------------------------------------
+    # ── 9-axis IMU placeholder ────────────────────────────────────────────
     #   3 accel (X/Y/Z) + 3 gyro (X/Y/Z) + 3 mag (X/Y/Z).
     #   Values shown as "--" until firmware sends real IMU data; the parser
     #   hook (_update_imu_values) is wired but a no-op until then.
@@ -1283,7 +806,7 @@ class EarendilControlGui(QMainWindow):
             headers.setSectionResizeMode(QHeaderView.Stretch)
         self._imu_table.setVerticalHeaderLabels([])
 
-        sensors = [("Accel", "m/s2"), ("Gyro", "deg/s"), ("Mag", "uT")]
+        sensors = [("Accel", "m/s²"), ("Gyro", "°/s"), ("Mag", "µT")]
         for row, (name, _unit) in enumerate(sensors):
             self._imu_table.setItem(row, 0, QTableWidgetItem(name))
             for col in range(1, 4):
@@ -1301,7 +824,6 @@ class EarendilControlGui(QMainWindow):
         """Update the IMU table from a 9-axis reading.
 
         `values` keys: AX, AY, AZ, GX, GY, GZ, MX, MY, MZ.
-        Kept as a hook for future firmware IMU parsing; currently unused.
         """
         rows = {"A": 0, "G": 1, "M": 2}
         for field in self.IMU_FIELDS:
@@ -1328,7 +850,7 @@ class EarendilControlGui(QMainWindow):
 
         console_splitter = QSplitter(Qt.Vertical)
 
-        # -- H7 Console ------------------------------------------------
+        # ── H7 Console ────────────────────────────────────────────────
         h7_widget = QWidget()
         h7_lay = QVBoxLayout(h7_widget)
         h7_lay.setContentsMargins(0, 0, 0, 0)
@@ -1374,7 +896,7 @@ class EarendilControlGui(QMainWindow):
         h7_lay.addLayout(h7_input_lay)
         console_splitter.addWidget(h7_widget)
 
-        # -- GUI Console -----------------------------------------------
+        # ── GUI Console ───────────────────────────────────────────────
         gui_widget = QWidget()
         gui_lay = QVBoxLayout(gui_widget)
         gui_lay.setContentsMargins(0, 0, 0, 0)
@@ -1411,13 +933,13 @@ class EarendilControlGui(QMainWindow):
 
         return grp
 
-    # ======================================================================
+    # ══════════════════════════════════════════════════════════════════════
     #  Theme Management
-    # ======================================================================
+    # ══════════════════════════════════════════════════════════════════════
     #
     #  Theme switching is purely visual.  _toggle_theme() flips self.current_theme,
     #  regenerates the stylesheet, restyles every theme-aware inline style and
-    #  repaints dynamic widgets to match the current state - WITHOUT touching
+    #  repaints dynamic widgets to match the current state — WITHOUT touching
     #  runtime state (serial connection, values, operating mode, pending mode,
     #  console contents, motor/IMU tables).
 
@@ -1443,17 +965,15 @@ class EarendilControlGui(QMainWindow):
         self._central.set_background_color(c['bg_main'])
         self._central.set_opacity(c['logo_opacity'])
 
-        # -- Static (builder-set) widgets re-styled to the active theme --
+        # ── Static (builder-set) widgets re-styled to the active theme ──
         self._style_connection_button()
         self._style_connection_status()
         self._style_console_widgets()
         self._style_help_button()
-        if hasattr(self, "_btn_motor_settings"):
-            self._style_motor_settings_button()
         if hasattr(self, "_lbl_op_mode_status"):
             self._update_operating_mode_ui(self._operating_mode)
 
-        # -- Dynamic state-driven widgets re-rendered to the active theme --
+        # ── Dynamic state-driven widgets re-rendered to the active theme ──
         # Quick-status mode badge (RPM/DUTY)
         if hasattr(self, "_lbl_qs_mode"):
             self._lbl_qs_mode.setText(f"Mode: {self.mode}")
@@ -1472,7 +992,7 @@ class EarendilControlGui(QMainWindow):
         if hasattr(self, "_lbl_mode"):
             self._style_mode_value_labels()
 
-    # -- Theme-aware style string helpers -----------------------------------
+    # ── Theme-aware style string helpers ───────────────────────────────────
 
     def _style_badge(self, text_color: str) -> str:
         """Style string for a quick-status badge label."""
@@ -1498,7 +1018,7 @@ class EarendilControlGui(QMainWindow):
             )
 
     def _style_connection_status(self):
-        """Style the * Connected / * Disconnected label."""
+        """Style the ● Connected / ● Disconnected label."""
         c = self._colors()
         color = c['accent_gold'] if self.connected else c['danger']
         self._lbl_status.setStyleSheet(
@@ -1560,23 +1080,8 @@ class EarendilControlGui(QMainWindow):
             f"QPushButton:hover {{ background-color: {c['selection_bg']}; }}"
         )
 
-    def _style_motor_settings_button(self):
-        """Style the Motor State 'Settings' button for the active theme.
-
-        Visually grouped with the help button (same accent/border language)
-        so the new entry stays consistent with the existing palette.
-        """
-        c = self._colors()
-        self._btn_motor_settings.setStyleSheet(
-            f"QPushButton {{ background-color: {c['bg_input']}; "
-            f"border: 1px solid {c['accent_gold']}; "
-            f"color: {c['accent_gold']}; font-weight: bold; }}"
-            f"QPushButton:hover {{ background-color: {c['selection_bg']}; }}"
-            f"QPushButton:pressed {{ background-color: {c['pressed_bg']}; }}"
-        )
-
     def _style_mode_value_labels(self):
-        """Re-style the Mode label + FB/ROT value labels for the active theme + mode."""
+        """Re-style the Mode label + Value label for the active theme + mode."""
         c = self._colors()
         if self.mode == "RPM":
             mode_color = c['accent_gold']
@@ -1587,10 +1092,7 @@ class EarendilControlGui(QMainWindow):
         self._lbl_mode.setStyleSheet(
             f"color: {mode_color}; font-size: 16px; font-weight: bold;"
         )
-        self._lbl_fb_value.setStyleSheet(
-            f"color: {value_color}; font-size: 18px; font-weight: bold;"
-        )
-        self._lbl_rot_value.setStyleSheet(
+        self._lbl_value.setStyleSheet(
             f"color: {value_color}; font-size: 18px; font-weight: bold;"
         )
 
@@ -1634,9 +1136,9 @@ class EarendilControlGui(QMainWindow):
         )
         return led
 
-    # ======================================================================
+    # ══════════════════════════════════════════════════════════════════════
     #  Console Logging
-    # ======================================================================
+    # ══════════════════════════════════════════════════════════════════════
 
     def _log_h7(self, prefix: str, text: str, color: str | None = None):
         """Append a colored line to the H7 Console.  `color` defaults to the
@@ -1677,9 +1179,9 @@ class EarendilControlGui(QMainWindow):
     def _log_warn(self, text: str):
         self._log_gui("[GUI-WARN]", text, self._colors()['warning'])
 
-    # ======================================================================
+    # ══════════════════════════════════════════════════════════════════════
     #  Serial Port Management
-    # ======================================================================
+    # ══════════════════════════════════════════════════════════════════════
 
     def _refresh_ports(self):
         self._port_combo.clear()
@@ -1719,7 +1221,7 @@ class EarendilControlGui(QMainWindow):
             self.reader_thread.disconnected.connect(self._handle_disconnect)
             self.reader_thread.start()
 
-            self._lbl_status.setText("* Connected")
+            self._lbl_status.setText("● Connected")
             self._style_connection_status()
             self._btn_connect.setText("Disconnect")
             self._style_connection_button()
@@ -1759,22 +1261,12 @@ class EarendilControlGui(QMainWindow):
         self.connected = False
 
     def _set_disconnected_ui(self):
-        self._reset_input_state(send_stop=False)
         self.connected = False
         # A pending mode change can never be confirmed while disconnected.
         self._pending_mode = None
         if self._pending_mode_timer.isActive():
             self._pending_mode_timer.stop()
-        if self._tuning_send_timer.isActive():
-            self._tuning_send_timer.stop()
-            self._tuning_send_queue.clear()
-            if self._tuning_dialog_ref is not None:
-                try:
-                    self._tuning_dialog_ref._set_send_buttons_enabled(True)
-                except Exception:
-                    pass
-                self._tuning_dialog_ref = None
-        self._lbl_status.setText("* Disconnected")
+        self._lbl_status.setText("● Disconnected")
         self._style_connection_status()
         self._btn_connect.setText("Connect")
         self._style_connection_button()
@@ -1783,78 +1275,63 @@ class EarendilControlGui(QMainWindow):
         self._lbl_qs_port.setText("Port: Disconnected")
         self._lbl_qs_port.setStyleSheet(self._style_badge(self._colors()['danger']))
 
-    # ======================================================================
+    # ══════════════════════════════════════════════════════════════════════
     #  Serial Receive
-    # ======================================================================
+    # ══════════════════════════════════════════════════════════════════════
 
     def _on_rx_line(self, line: str):
         self._log_rx(line)
-        if self._parse_motor_telemetry_line(line):
-            pass  # telemetry handled
-        else:
-            self._parse_rx_for_motor_state(line)
+        self._parse_rx_for_motor_state(line)
         self._parse_uart_error_line(line)
         self._parse_operating_mode_confirm(line)
+        self._parse_imu_line(line)
+
+    def _parse_imu_line(self, line: str):
+        match = _RE_IMU_DATA.match(line)
+        if match:
+            try:
+                roll = float(match.group(1))
+                pitch = float(match.group(2))
+                yaw = float(match.group(3))
+                self._update_imu_values({"AX": roll, "AY": pitch, "AZ": yaw})
+            except ValueError:
+                pass
 
     def _parse_rx_for_motor_state(self, line: str):
-        """Update Link column if link-lost/recovered detected."""
+        """Minimal parsing: update Link column if link-lost/recovered detected."""
         lower = line.lower()
-        link_col = self.MOTOR_COL["link"]
-        for tag, row in self.MOTOR_ROW.items():
-            if f"link_lost][{tag}" in lower:
-                item = self._motor_table.item(row, link_col)
+        motor_map = {"fl": 0, "fr": 1, "rl": 2, "rr": 3}
+        for tag, row in motor_map.items():
+            if f"link_lost][{tag}" in lower or f"link lost.*{tag}" in lower:
+                item = self._motor_table.item(row, 5)
                 if item:
                     item.setText("LOST")
-                    item.setForeground(QColor(self._colors()["danger"]))
+                    item.setForeground(QColor("#B00020"))
             if f"link_recovered][{tag}" in lower:
-                item = self._motor_table.item(row, link_col)
+                item = self._motor_table.item(row, 5)
                 if item:
                     item.setText("OK")
-                    item.setForeground(QColor(self._colors()["success_bright"]))
+                    item.setForeground(QColor("#D4AF37"))
 
-    # -- UART error / recovery parsing ---------------------------------------
+    # ── UART error / recovery parsing ───────────────────────────────────────
     #
     # The H7 firmware (motor_uart_dma.c) reports UART errors over the
     # terminal link (USART3) as plain log lines.  These are NOT motor
     # protocol frames (ACK/STATUS/FAULT), so the existing table parser
     # ignored them and only the console showed them.  These methods detect
     # those log lines and route them into the motor table's Error column
-    # using the firmware's UART->motor mapping.
+    # using the firmware's UART→motor mapping.
 
     def _set_motor_error(self, motor: str, text: str, is_error: bool):
-        """Write `text` into the UART error state and re-render the Error column."""
+        """Write `text` into the Error column (col 4) of the motor row."""
         row = self.MOTOR_ROW.get(motor)
         if row is None:
             return
-        self._motor_uart_error_text[motor] = text if is_error else ""
-        self._render_motor_error(motor)
-
-    def _render_motor_error(self, motor: str):
-        """Render the Error column from UART error + F411 fault code state.
-
-        Priority: UART error > F411 fault code > No Error.
-        """
-        row = self.MOTOR_ROW.get(motor)
-        if row is None:
-            return
-        c = self._colors()
-        col = self.MOTOR_COL["error"]
-        item = self._motor_table.item(row, col)
-        if item is None:
-            return
-
-        uart_err = self._motor_uart_error_text.get(motor, "")
-        fc = self._motor_fault_code.get(motor, "0")
-
-        if uart_err:
-            item.setText(uart_err)
-            item.setForeground(QColor(c["danger"]))
-        elif fc != "0":
-            item.setText(f"Fault Code: {fc}")
-            item.setForeground(QColor(c["danger"]))
-        else:
-            item.setText("No Error")
-            item.setForeground(QColor(c["success_bright"]))
+        self._motor_error_text[motor] = text
+        item = self._motor_table.item(row, 4)
+        if item is not None:
+            item.setText(text)
+            item.setForeground(QColor("#B00020") if is_error else QColor("#D4AF37"))
 
     def _parse_uart_error_line(self, line: str) -> bool:
         """Detect H7 UART error/recovery log lines and update the motor table.
@@ -1890,150 +1367,19 @@ class EarendilControlGui(QMainWindow):
                     self._set_motor_error(motor, ", ".join(buf), is_error=True)
             return True
 
-        # RX recovered after a previous UART error -> clear UART error state.
+        # RX recovered after a previous UART error → clear the Error column.
         m = _RE_UART_RECOVERED.match(line)
         if m:
             uart = m.group(1)
             motor = self.UART_TO_MOTOR.get(uart)
             if motor is not None:
                 self._uart_report_decoded.pop(uart, None)
-                self._set_motor_error(motor, "", is_error=False)
+                self._set_motor_error(motor, "OK", is_error=False)
             return True
 
         return False
 
-    # -- F411 Motor telemetry parsing --------------------------------------
-
-    def _parse_motor_telemetry_line(self, line: str) -> bool:
-        """Detect and parse F411 telemetry from [TEL][MOTOR] or legacy [UART_RX].
-
-        Returns True if the line was recognized as telemetry.
-        """
-        motor = None
-        payload = None
-
-        m = _RE_MOTOR_TEL_TAGGED.match(line)
-        if m:
-            motor = m.group(1)
-            payload = m.group(2)
-        else:
-            m = _RE_MOTOR_TEL_UART.match(line)
-            if m:
-                uart_tag = m.group(1)
-                motor = self.UART_RX_TO_MOTOR.get(uart_tag)
-                payload = m.group(2)
-
-        if motor is None or payload is None:
-            return False
-
-        tel = self._parse_telemetry_payload(payload)
-        if not tel:
-            return False
-
-        self._update_motor_telemetry(motor, tel)
-        return True
-
-    @staticmethod
-    def _parse_telemetry_payload(payload: str) -> dict[str, str]:
-        """Parse 'RPM:60,T:0,D:0,...' into {'RPM': '60', 'T': '0', ...}."""
-        result = {}
-        for token in payload.split(","):
-            if ":" not in token:
-                continue
-            key, val = token.split(":", 1)
-            result[key.strip()] = val.strip()
-        return result
-
-    def _update_motor_telemetry(self, motor: str, tel: dict[str, str]):
-        """Write parsed telemetry values into the motor table row."""
-        row = self.MOTOR_ROW.get(motor)
-        if row is None:
-            return
-
-        c = self._colors()
-        col = self.MOTOR_COL
-        tbl = self._motor_table
-        stored = self._motor_telemetry[motor]
-
-        # Merge new values into stored dict
-        for k, v in tel.items():
-            stored[k] = v
-
-        # Helper to set a cell
-        def _set(col_name: str, text: str, color: str | None = None):
-            item = tbl.item(row, col[col_name])
-            if item is not None:
-                item.setText(text)
-                if color:
-                    item.setForeground(QColor(color))
-
-        # Direct mappings
-        _set("current_rpm", tel.get("RPM", stored.get("RPM", "--")))
-        _set("target_rpm", tel.get("T", stored.get("T", "--")))
-        _set("drive_duty", tel.get("D", stored.get("D", "--")))
-        _set("hall_sensor", tel.get("H", stored.get("H", "--")))
-        _set("target_pwm", tel.get("PWM_SET", stored.get("PWM_SET", "--")))
-        _set("applied_pwm", tel.get("PWM_ACT", stored.get("PWM_ACT", "--")))
-        _set("dropped_commands", tel.get("QDROP", stored.get("QDROP", "--")))
-        _set("received_uart_bytes", tel.get("RXB", stored.get("RXB", "--")))
-
-        # Translated fields
-        dir_val = tel.get("DIR", stored.get("DIR", "--"))
-        _set("direction", self._translate_direction(dir_val))
-
-        app_ph = tel.get("APP_PH", stored.get("APP_PH", "--"))
-        ms_text = self._translate_app_phase(app_ph)
-        ms_color = None
-        if ms_text == "Error":
-            ms_color = c["danger"]
-        elif ms_text == "Brake":
-            ms_color = c["warning"]
-        _set("motor_state", ms_text, ms_color)
-
-        sp = tel.get("SP", stored.get("SP", "--"))
-        _set("control_mode", self._translate_speed_mode(sp))
-
-        brk = tel.get("BRAKE", stored.get("BRAKE", "--"))
-        brk_text = self._translate_brake(brk)
-        brk_color = c["danger"] if brk_text == "Brake Active" else None
-        _set("brake_status", brk_text, brk_color)
-
-        # Fault code
-        fc = tel.get("FC", stored.get("FC", "0"))
-        self._motor_fault_code[motor] = fc
-        fc_item = tbl.item(row, col["fault_code"])
-        if fc_item is not None:
-            if fc == "0":
-                fc_item.setText("No Error")
-                fc_item.setForeground(QColor(c["success_bright"]))
-            else:
-                fc_item.setText(f"Fault Code: {fc}")
-                fc_item.setForeground(QColor(c["danger"]))
-
-        # Re-render Error column (UART error has priority over FC)
-        self._render_motor_error(motor)
-
-        # Link -> OK when telemetry received
-        link_item = tbl.item(row, col["link"])
-        if link_item is not None:
-            link_item.setText("OK")
-            link_item.setForeground(QColor(c["success_bright"]))
-
-    # -- Telemetry value translators ----------------------------------------
-
-    def _translate_app_phase(self, value: str) -> str:
-        return self._APP_PH_MAP.get(value, f"Unknown ({value})")
-
-    def _translate_direction(self, value: str) -> str:
-        return self._DIR_MAP.get(value, f"Unknown ({value})")
-
-    def _translate_speed_mode(self, value: str) -> str:
-        return self._SP_MAP.get(value, f"Unknown ({value})")
-
-    def _translate_brake(self, value: str) -> str:
-        return self._BRAKE_MAP.get(value, f"Unknown ({value})")
-
-    # -- Operating-mode confirmation parsing ---------------------------------
+    # ── Operating-mode confirmation parsing ─────────────────────────────────
     #
     # The H7 firmware (command_handler.c) prints a confirmation line after it
     # actually applies an operating-mode change:
@@ -2096,13 +1442,13 @@ class EarendilControlGui(QMainWindow):
         self._log_warn(
             f"Mode change to "
             f"{self.OPERATING_MODES.get(failed, {}).get('label', failed)} "
-            f"not confirmed by H7 - keeping current mode "
+            f"not confirmed by H7 — keeping current mode "
             f"({self.OPERATING_MODES.get(self._operating_mode, {}).get('label', self._operating_mode)})."
         )
 
-    # ======================================================================
+    # ══════════════════════════════════════════════════════════════════════
     #  Serial Send
-    # ======================================================================
+    # ══════════════════════════════════════════════════════════════════════
 
     def _send_cmd(self, cmd: str):
         """Send a raw command string to the H7."""
@@ -2128,18 +1474,14 @@ class EarendilControlGui(QMainWindow):
             self._send_cmd(text)
         self.setFocus()  # return focus to main window so WASD works again
 
-    # ======================================================================
+    # ══════════════════════════════════════════════════════════════════════
     #  Mode / Value Management
-    # ======================================================================
+    # ══════════════════════════════════════════════════════════════════════
 
-    def _get_movement_value(self, key: str) -> int:
-        """Return the appropriate value for a movement key (W/S=FB, A/D=ROT)."""
-        if key in ("W", "S"):
-            return self.fb_rpm if self.mode == "RPM" else self.fb_pwm
-        else:
-            return self.rot_rpm if self.mode == "RPM" else self.rot_pwm
+    def _get_current_value(self) -> int:
+        return self.current_rpm if self.mode == "RPM" else self.current_pwm
 
-    # -- Operating mode (DISARM / MANUAL / AUTONOMOUS) ---------------------
+    # ── Operating mode (DISARM / MANUAL / AUTONOMOUS) ─────────────────────
     #   Distinct from the RPM/DUTY drive mode below.  Commands go through the
     #   same _send_cmd path used by all other H7 terminal commands so that
     #   history/logging/disconnected handling stay consistent.
@@ -2161,7 +1503,7 @@ class EarendilControlGui(QMainWindow):
         self._pending_mode_timer.start()
         if not already_pending:
             self._log_info(
-                f"Requested {cfg['label']} - waiting for H7 confirmation..."
+                f"Requested {cfg['label']} — waiting for H7 confirmation..."
             )
 
     def _update_operating_mode_ui(self, mode_key: str):
@@ -2191,16 +1533,12 @@ class EarendilControlGui(QMainWindow):
         self.mode = new_mode
         self._lbl_mode.setText(new_mode)
         if new_mode == "RPM":
-            self._lbl_fb_label.setText("FB RPM:")
-            self._lbl_fb_value.setText(str(self.fb_rpm))
-            self._lbl_rot_label.setText("ROT RPM:")
-            self._lbl_rot_value.setText(str(self.rot_rpm))
+            self._lbl_value_label.setText("RPM Value:")
+            self._lbl_value.setText(str(self.current_rpm))
             self._send_cmd("m speed")
         else:
-            self._lbl_fb_label.setText("FB PWM:")
-            self._lbl_fb_value.setText(str(self.fb_pwm))
-            self._lbl_rot_label.setText("ROT PWM:")
-            self._lbl_rot_value.setText(str(self.rot_pwm))
+            self._lbl_value_label.setText("Duty Value:")
+            self._lbl_value.setText(str(self.current_pwm))
             self._send_cmd("m duty")
         # Re-style the Mode + Value labels for the active theme + mode.
         self._style_mode_value_labels()
@@ -2211,42 +1549,31 @@ class EarendilControlGui(QMainWindow):
     def _toggle_mode(self):
         self._set_mode("DUTY" if self.mode == "RPM" else "RPM")
 
-    def _adjust_value(self, delta: int, target: str = "fb"):
-        """Adjust FB or ROT value by delta. target is 'fb' or 'rot'."""
-        if target == "fb":
-            if self.mode == "RPM":
-                self.fb_rpm = max(0, min(self.RPM_MAX, self.fb_rpm + delta))
-                self._lbl_fb_value.setText(str(self.fb_rpm))
-                self._log_info(f"FB RPM set to {self.fb_rpm}")
-            else:
-                self.fb_pwm = max(0, min(self.PWM_MAX, self.fb_pwm + delta))
-                self._lbl_fb_value.setText(str(self.fb_pwm))
-                self._log_info(f"FB PWM set to {self.fb_pwm}")
+    def _adjust_value(self, delta: int):
+        if self.mode == "RPM":
+            self.current_rpm = max(0, min(self.RPM_MAX, self.current_rpm + delta))
+            self._lbl_value.setText(str(self.current_rpm))
+            self._log_info(f"RPM value set to {self.current_rpm}")
         else:
-            if self.mode == "RPM":
-                self.rot_rpm = max(0, min(self.RPM_MAX, self.rot_rpm + delta))
-                self._lbl_rot_value.setText(str(self.rot_rpm))
-                self._log_info(f"ROT RPM set to {self.rot_rpm}")
-            else:
-                self.rot_pwm = max(0, min(self.PWM_MAX, self.rot_pwm + delta))
-                self._lbl_rot_value.setText(str(self.rot_pwm))
-                self._log_info(f"ROT PWM set to {self.rot_pwm}")
+            self.current_pwm = max(0, min(self.PWM_MAX, self.current_pwm + delta))
+            self._lbl_value.setText(str(self.current_pwm))
+            self._log_info(f"Duty value set to {self.current_pwm}")
 
-    # ======================================================================
+    # ══════════════════════════════════════════════════════════════════════
     #  Movement Command Mapping
-    # ======================================================================
+    # ══════════════════════════════════════════════════════════════════════
 
     def _movement_cmd(self, key: str) -> str:
         """Return the command string for a movement key in the current mode."""
-        val = self._get_movement_value(key)
+        val = self._get_current_value()
         if self.mode == "RPM":
             return {"W": f"f{val}", "S": f"b{val}", "A": f"l{val}", "D": f"r{val}"}[key]
         else:
             return {"W": f"fd{val}", "S": f"bd{val}", "A": f"ld{val}", "D": f"rd{val}"}[key]
 
-    # ======================================================================
+    # ══════════════════════════════════════════════════════════════════════
     #  Keyboard Handling
-    # ======================================================================
+    # ══════════════════════════════════════════════════════════════════════
 
     def eventFilter(self, obj, event):
         """Event filter only for H7 input field."""
@@ -2267,8 +1594,6 @@ class EarendilControlGui(QMainWindow):
             return text
         if key == Qt.Key_Space:
             return "Space"
-        if key == Qt.Key_Escape:
-            return "Escape"
         if text == "X":
             return "X"
         if text == "M":
@@ -2279,10 +1604,6 @@ class EarendilControlGui(QMainWindow):
             return "Shift"
         if key == Qt.Key_Control:
             return "Ctrl"
-        if key == Qt.Key_Plus or text == "+":
-            return "NumPlus"
-        if key == Qt.Key_Minus or text == "-":
-            return "NumMinus"
         return None
 
     def keyPressEvent(self, event: QKeyEvent):
@@ -2302,36 +1623,25 @@ class EarendilControlGui(QMainWindow):
             if not self._repeat_timer.isActive():
                 self._repeat_timer.start()
         elif key_id == "Space":
-            self._reset_input_state(send_stop=True)
+            self._send_cmd("stop")
+            self._update_motion_indicator(None)
         elif key_id == "X":
             self._send_cmd("brake")
-            self._reset_input_state(send_stop=False)
+            self._update_motion_indicator(None)
         elif key_id == "M":
             self._toggle_mode()
         elif key_id == "I":
             self._send_cmd("identify")
         elif key_id == "Shift":
             self._active_modifier = "Shift"
-            self._adjust_value(self.VALUE_STEP, target="fb")
+            self._adjust_value(self.VALUE_STEP)
             if not self._repeat_timer.isActive():
                 self._repeat_timer.start()
         elif key_id == "Ctrl":
             self._active_modifier = "Ctrl"
-            self._adjust_value(-self.VALUE_STEP, target="fb")
+            self._adjust_value(-self.VALUE_STEP)
             if not self._repeat_timer.isActive():
                 self._repeat_timer.start()
-        elif key_id == "NumPlus":
-            self._active_modifier = "NumPlus"
-            self._adjust_value(self.VALUE_STEP, target="rot")
-            if not self._repeat_timer.isActive():
-                self._repeat_timer.start()
-        elif key_id == "NumMinus":
-            self._active_modifier = "NumMinus"
-            self._adjust_value(-self.VALUE_STEP, target="rot")
-            if not self._repeat_timer.isActive():
-                self._repeat_timer.start()
-        elif key_id == "Escape":
-            self._reset_input_state(send_stop=True)
 
     def keyReleaseEvent(self, event: QKeyEvent):
         if event.isAutoRepeat():
@@ -2354,65 +1664,27 @@ class EarendilControlGui(QMainWindow):
                     self._repeat_timer.stop()
                 self._send_cmd("stop")
             self._update_motion_indicator(self._active_move_key)
-        elif key_id in ("Shift", "Ctrl", "NumPlus", "NumMinus"):
+        elif key_id in ("Shift", "Ctrl"):
             self._active_modifier = None
             if not self._active_move_key:
                 self._repeat_timer.stop()
 
         super().keyReleaseEvent(event)
 
-    def changeEvent(self, event):
-        if event.type() == QEvent.WindowDeactivate:
-            self._reset_input_state(send_stop=True)
-        super().changeEvent(event)
-
-    def _reset_input_state(self, send_stop: bool = False):
-        """Reset all keyboard input state to a clean baseline.
-
-        Call this on focus loss, window deactivate, disconnect, Escape,
-        stop, or brake to prevent stale key state from causing runaway
-        RPM/PWM changes or phantom movement repeats.
-        """
-        self._active_modifier = None
-        self._active_move_key = None
-        self._move_held.clear()
-        self._move_order.clear()
-        self._keys_held.clear()
-        self._repeat_timer.stop()
-        self._update_motion_indicator(None)
-        if send_stop:
-            self._send_cmd("stop")
-
     def _repeat_movement(self):
         """Called every 500 ms by the repeat timer."""
-        # Guard against missed keyReleaseEvent: verify modifier is still held
-        if self._active_modifier and self._active_modifier not in self._keys_held:
-            self._active_modifier = None
-        # Guard against missed keyReleaseEvent: verify movement key is still held
-        if self._active_move_key and self._active_move_key not in self._keys_held:
-            self._move_held.discard(self._active_move_key)
-            self._move_order = deque(k for k in self._move_order if k != self._active_move_key)
-            if self._move_order:
-                self._active_move_key = self._move_order[-1]
-            else:
-                self._active_move_key = None
-
         if self._active_move_key:
             self._send_cmd(self._movement_cmd(self._active_move_key))
         if self._active_modifier == "Shift":
-            self._adjust_value(self.VALUE_STEP, target="fb")
+            self._adjust_value(self.VALUE_STEP)
         elif self._active_modifier == "Ctrl":
-            self._adjust_value(-self.VALUE_STEP, target="fb")
-        elif self._active_modifier == "NumPlus":
-            self._adjust_value(self.VALUE_STEP, target="rot")
-        elif self._active_modifier == "NumMinus":
-            self._adjust_value(-self.VALUE_STEP, target="rot")
+            self._adjust_value(-self.VALUE_STEP)
         if not self._active_move_key and not self._active_modifier:
             self._repeat_timer.stop()
 
-    # ======================================================================
+    # ══════════════════════════════════════════════════════════════════════
     #  Help Popup
-    # ======================================================================
+    # ══════════════════════════════════════════════════════════════════════
 
     def _show_help_popup(self):
         c = self._colors()
@@ -2445,7 +1717,7 @@ class EarendilControlGui(QMainWindow):
         layout = QVBoxLayout(dlg)
         layout.setSpacing(12)
 
-        title = QLabel("Earendil - Rover Control GUI Help")
+        title = QLabel("Earendil — Rover Control GUI Help")
         title.setStyleSheet(
             f"font-size: 18px; font-weight: bold; color: {c['accent_gold']};"
         )
@@ -2459,18 +1731,16 @@ class EarendilControlGui(QMainWindow):
 
         keys_html = (
             f"<table style='font-size:13px; color:{c['text']};' cellspacing='8'>"
-            f"<tr><td style='color:{c['accent_gold_bright']};'><b>W</b></td><td>Forward (FB value)</td>"
+            f"<tr><td style='color:{c['accent_gold_bright']};'><b>W</b></td><td>Forward</td>"
             f"<td style='color:{c['accent_gold_bright']};'><b>Space</b></td><td>Stop</td></tr>"
-            f"<tr><td style='color:{c['accent_gold_bright']};'><b>S</b></td><td>Backward (FB value)</td>"
+            f"<tr><td style='color:{c['accent_gold_bright']};'><b>S</b></td><td>Backward</td>"
             f"<td style='color:{c['accent_gold_bright']};'><b>X</b></td><td>Brake</td></tr>"
-            f"<tr><td style='color:{c['accent_gold_bright']};'><b>A</b></td><td>Left (ROT value)</td>"
+            f"<tr><td style='color:{c['accent_gold_bright']};'><b>A</b></td><td>Left</td>"
             f"<td style='color:{c['accent_gold_bright']};'><b>M</b></td><td>Toggle RPM/DUTY</td></tr>"
-            f"<tr><td style='color:{c['accent_gold_bright']};'><b>D</b></td><td>Right (ROT value)</td>"
+            f"<tr><td style='color:{c['accent_gold_bright']};'><b>D</b></td><td>Right</td>"
             f"<td style='color:{c['accent_gold_bright']};'><b>I</b></td><td>Identify</td></tr>"
-            f"<tr><td style='color:{c['accent_gold_bright']};'><b>LShift</b></td><td>FB value +5</td>"
-            f"<td style='color:{c['accent_gold_bright']};'><b>LCtrl</b></td><td>FB value -5</td></tr>"
-            f"<tr><td style='color:{c['accent_gold_bright']};'><b>Num+</b></td><td>ROT value +5</td>"
-            f"<td style='color:{c['accent_gold_bright']};'><b>Num-</b></td><td>ROT value -5</td></tr>"
+            f"<tr><td style='color:{c['accent_gold_bright']};'><b>LShift</b></td><td>Value +5</td>"
+            f"<td style='color:{c['accent_gold_bright']};'><b>LCtrl</b></td><td>Value -5</td></tr>"
             f"</table>"
         )
         keys_label = QLabel(keys_html)
@@ -2485,13 +1755,12 @@ class EarendilControlGui(QMainWindow):
         mode_html = (
             f"<table style='font-size:13px; color:{c['text']};' cellspacing='4'>"
             f"<tr><td style='color:{c['accent_gold']};'><b>RPM mode:</b></td>"
-            f"<td>W/S use FB RPM, A/D use ROT RPM  (cmd: m speed)</td></tr>"
+            f"<td>W/S/A/D sends f/b/l/r&lt;number&gt;  (cmd: m speed)</td></tr>"
             f"<tr><td style='color:{c['accent_gold']};'><b>DUTY mode:</b></td>"
-            f"<td>W/S use FB PWM, A/D use ROT PWM  (cmd: m duty)</td></tr>"
+            f"<td>W/S/A/D sends fd/bd/ld/rd&lt;number&gt;  (cmd: m duty)</td></tr>"
             f"</table>"
             f"<br>"
-            f"<span style='color:{c['text_muted']};'>Held key repeats every 500 ms. "
-            f"Shift/Ctrl adjust FB value. Num+/Num- adjust ROT value.</span>"
+            f"<span style='color:{c['text_muted']};'>Held key repeats every 500 ms</span>"
         )
         mode_label = QLabel(mode_html)
         mode_label.setTextFormat(Qt.RichText)
@@ -2520,228 +1789,20 @@ class EarendilControlGui(QMainWindow):
 
         dlg.exec()
 
-    # ======================================================================
-    #  F411 Motor Tuning - placeholder command builder + sender
-    # ======================================================================
-    #  Single source of truth for the placeholder F411 tuning command format.
-    #  The GUI forwards tuning commands to the H7 firmware via the
-    #  "<MOTOR> <keyword> <args...>" syntax.  The H7 parser validates
-    #  and normalises these before forwarding the payload to the
-    #  selected F411 motor UART.  For "ALL", the H7 broadcasts to
-    #  all four motor UARTs.
-    #
-    #  Settings dict shape produced by the dialog
-    #  (MotorSettingsDialog.collect_f411_tuning_settings):
-    #     base      : list[str]*8   (Base PWM 1..8, raw text)
-    #     boost     : list[str]*8   (Boost PWM 1..8, raw text)
-    #     boostms   : str           (single global Boost MS, raw text)
-    #     kick_duty : str           (raw text)
-    #     kick_ms   : str           (raw text)
-    #     ramp_up   : str           (raw text)
-    #     ramp_down : str           (raw text)
-    #     kp        : str           (raw text)
-    #     ki        : str           (raw text)
-    #     telper    : str           (raw text)
-    #     custom    : str           (raw text - handled by the dialog itself)
-
-    # H7 motor tuning command keywords - match the firmware parser exactly.
-    # Format: "<MOTOR> <keyword> <args...>" sent through _send_cmd().
-    F411_TUNE_KW_BASE     = "base"       # <P1>..<P8>
-    F411_TUNE_KW_BOOST    = "boost"      # <P1>..<P8> <MS>
-    F411_TUNE_KW_KICKDUTY = "kickduty"   # <VALUE>
-    F411_TUNE_KW_KICKMS   = "kickms"     # <VALUE>
-    F411_TUNE_KW_RAMP     = "ramp"       # <UP> <DOWN>
-    F411_TUNE_KW_PI       = "pi"         # <KP> <KI>
-    F411_TUNE_KW_TELPER   = "telper"     # <MS>
-
-    def build_f411_tuning_commands(self, target_motor: str, settings: dict) -> list:
-        """Build validated H7 motor tuning commands for one motor or ALL.
-
-        `target_motor` is one of "FL", "FR", "RL", "RR", "ALL".
-        Returns a list of complete H7 terminal command strings ready to
-        send through _send_cmd().  Skips commands whose required fields
-        are empty or inconsistent, logging a GUI warning for partial input.
-        """
-        cmds = []
-        log = self._log_warn  # shorthand
-
-        # -- Base PWM: base P1 P2 P3 P4 P5 P6 P7 P8 --------------------
-        bases = settings.get("base", [""] * 8) or [""] * 8
-        # Pad to 8 if shorter
-        while len(bases) < 8:
-            bases.append("")
-        all_empty = all(v == "" for v in bases[:8])
-        some_empty = not all_empty and any(v == "" for v in bases[:8])
-        if all_empty:
-            pass  # skip silently
-        elif some_empty:
-            log("[F411-TUNE] Base PWM: not all 8 values filled - skipped")
-        else:
-            vals = " ".join(v if v != "" else "0" for v in bases[:8])
-            cmds.append(f"{target_motor} {self.F411_TUNE_KW_BASE} {vals}")
-
-        # -- Boost PWM: boost P1..P8 MS --------------------------------
-        boosts = settings.get("boost", [""] * 8) or [""] * 8
-        while len(boosts) < 8:
-            boosts.append("")
-        boostms = settings.get("boostms", "")
-        all_b_empty = all(v == "" for v in boosts[:8]) and boostms == ""
-        some_b_empty = not all_b_empty and (
-            any(v == "" for v in boosts[:8]) or boostms == "")
-        if all_b_empty:
-            pass
-        elif some_b_empty:
-            log("[F411-TUNE] Boost: need all 8 PWM values + Boost MS - skipped")
-        else:
-            pvals = " ".join(v if v != "" else "0" for v in boosts[:8])
-            cmds.append(
-                f"{target_motor} {self.F411_TUNE_KW_BOOST} {pvals} {boostms}"
-            )
-
-        # -- Kick Duty: kickduty VALUE ----------------------------------
-        kick_duty = settings.get("kick_duty", "")
-        if kick_duty != "":
-            cmds.append(
-                f"{target_motor} {self.F411_TUNE_KW_KICKDUTY} {kick_duty}"
-            )
-
-        # -- Kick MS: kickms VALUE --------------------------------------
-        kick_ms = settings.get("kick_ms", "")
-        if kick_ms != "":
-            cmds.append(
-                f"{target_motor} {self.F411_TUNE_KW_KICKMS} {kick_ms}"
-            )
-
-        # -- Ramp: ramp UP DOWN -----------------------------------------
-        ramp_up = settings.get("ramp_up", "")
-        ramp_dn = settings.get("ramp_down", "")
-        if ramp_up == "" and ramp_dn == "":
-            pass
-        elif ramp_up == "" or ramp_dn == "":
-            log("[F411-TUNE] Ramp: need both Up and Down - skipped")
-        else:
-            cmds.append(
-                f"{target_motor} {self.F411_TUNE_KW_RAMP} {ramp_up} {ramp_dn}"
-            )
-
-        # -- PI: pi KP KI ----------------------------------------------
-        kp = settings.get("kp", "")
-        ki = settings.get("ki", "")
-        if kp == "" and ki == "":
-            pass
-        elif kp == "" or ki == "":
-            log("[F411-TUNE] PI: need both Kp and Ki - skipped")
-        else:
-            cmds.append(
-                f"{target_motor} {self.F411_TUNE_KW_PI} {kp} {ki}"
-            )
-
-        # -- Telemetry Period: telper MS --------------------------------
-        telper = settings.get("telper", "")
-        if telper != "":
-            cmds.append(
-                f"{target_motor} {self.F411_TUNE_KW_TELPER} {telper}"
-            )
-
-        # -- Custom command ---------------------------------------------
-        custom = settings.get("custom", "")
-        if custom:
-            cmds.append(f"{target_motor} {custom}")
-
-        return cmds
-
-    def send_f411_tuning_command(self, target_motor: str, command: str):
-        """Send one validated H7 motor tuning command line and log it.
-
-        `command` must be the full line (e.g. "FL pi 0.8 0.05") and is
-        forwarded through _send_cmd() - the same serial path used by all
-        other H7 terminal commands.  If serial is not connected, the
-        command is still logged with a warning so the operator can see
-        what would have been sent.
-        with a warning so the operator can see what would have been sent.
-        """
-        if not self.connected or not self.ser or not self.ser.is_open:
-            self._log_warn(
-                f"[F411-TUNE] Not sent (serial disconnected): {command}"
-            )
-            return
-        self._log_info(f"[F411-TUNE] {command}")
-        self._send_cmd(command)
-
-    def _open_motor_settings(self):
-        """Open the F411 Motor Tuning Settings dialog (Modal)."""
-        dlg = MotorSettingsDialog(self, self)
-        dlg.exec()
-
-    # -- F411 tuning paced-send (QTimer-based, no blocking) --------------
-
-    def enqueue_f411_tuning_sequence(self, commands: list[str], dialog=None):
-        """Queue a paced sequence of F411 tuning commands.
-
-        Commands are sent one-by-one via QTimer at TUNING_SEND_INTERVAL_MS
-        so the H7 terminal RX FIFO and motor TX FIFO can absorb them
-        without loss.  Send buttons are disabled during the sequence and
-        re-enabled on completion.
-        """
-        if self._tuning_send_queue:
-            self._log_warn("[F411-TUNE] A tuning sequence is already running")
-            return
-
-        self._tuning_dialog_ref = dialog
-        self._tuning_send_queue.extend(commands)
-        self._log_info(f"[F411-TUNE] Queued {len(commands)} paced command(s)")
-
-        if dialog is not None:
-            dialog._set_send_buttons_enabled(False)
-
-        # Send the first command immediately; the timer drives the rest.
-        self._send_next_f411_tuning_command()
-        if self._tuning_send_queue:
-            self._tuning_send_timer.start()
-
-    def _send_next_f411_tuning_command(self):
-        """Pop and send the next queued tuning command (timer callback)."""
-        if not self._tuning_send_queue:
-            self._tuning_send_timer.stop()
-            self._log_info("[F411-TUNE] Tuning sequence complete")
-            dlg = self._tuning_dialog_ref
-            self._tuning_dialog_ref = None
-            if dlg is not None:
-                dlg._set_send_buttons_enabled(True)
-            return
-
-        cmd = self._tuning_send_queue.popleft()
-        if not self.connected or not self.ser or not self.ser.is_open:
-            self._log_warn(f"[F411-TUNE] Not sent (serial disconnected): {cmd}")
-            # Drain remaining queue so buttons get re-enabled.
-            self._tuning_send_queue.clear()
-            self._tuning_send_timer.stop()
-            self._log_warn("[F411-TUNE] Sequence aborted (serial disconnected)")
-            dlg = self._tuning_dialog_ref
-            self._tuning_dialog_ref = None
-            if dlg is not None:
-                dlg._set_send_buttons_enabled(True)
-            return
-
-        self._log_info(f"[F411-TUNE] {cmd}")
-        self._send_cmd(cmd)
-
-    # ======================================================================
+    # ══════════════════════════════════════════════════════════════════════
     #  Cleanup
-    # ======================================================================
+    # ══════════════════════════════════════════════════════════════════════
 
     def closeEvent(self, event):
-        self._tuning_send_timer.stop()
-        self._tuning_send_queue.clear()
         self._repeat_timer.stop()
         self._stop_reader()
         self._close_serial()
         super().closeEvent(event)
 
 
-# ============================================================================
+# ════════════════════════════════════════════════════════════════════════════
 #  Entry Point
-# ============================================================================
+# ════════════════════════════════════════════════════════════════════════════
 
 def main():
     app = QApplication(sys.argv)

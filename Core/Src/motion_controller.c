@@ -28,6 +28,31 @@ void MotionController_Init(void)
     memset(motorCmds, 0, sizeof(motorCmds));
 }
 
+/* Right-side motors (FR, RR) are physically mounted in reverse.
+ * Invert their direction so logical forward/backward commands
+ * produce the correct physical motion. */
+static void ApplyMotorPolarity(MotorCmd_t cmds[MOTOR_COUNT])
+{
+    static const char *names[] = {"FL", "FR", "RL", "RR"};
+    static const char *dirStr[] = {"STOP", "FWD", "BWD"};
+
+    for (int i = 0; i < MOTOR_COUNT; i++)
+    {
+        if (i == MOTOR_FR || i == MOTOR_RR)
+        {
+            MotorDir_t orig = cmds[i].dir;
+            if (orig == MCMD_FORWARD)
+                cmds[i].dir = MCMD_BACKWARD;
+            else if (orig == MCMD_BACKWARD)
+                cmds[i].dir = MCMD_FORWARD;
+
+            if (orig != cmds[i].dir)
+                Logger_Log(LOG_INFO, "[POLARITY] %s: %s -> %s",
+                           names[i], dirStr[orig], dirStr[cmds[i].dir]);
+        }
+    }
+}
+
 void MotionController_Execute(const MotionCmd_t *cmd)
 {
     if (cmd == NULL)
@@ -65,6 +90,7 @@ void MotionController_Execute(const MotionCmd_t *cmd)
             break;
     }
 
+    ApplyMotorPolarity(motorCmds);
     Logger_Log(LOG_INFO, "Motion: dir=%d spd=%d", cmd->direction, cmd->speed);
     MotorDispatcher_SendAll(motorCmds);
 }
