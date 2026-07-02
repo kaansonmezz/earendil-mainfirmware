@@ -51,7 +51,16 @@ typedef enum
     TCMD_MOTION,        /* f/b/r/l/fd/bd/rd/ld + value */
     TCMD_MOTOR_RAW,     /* FL/FR/RL/RR <text> : raw text to one motor only */
     TCMD_MOTOR_TUNE,    /* FL/FR/RL/RR/ALL <tuning command> : validated tuning */
-    TCMD_TERMSTAT       /* termstat : terminal RX queue diagnostics */
+    TCMD_TERMSTAT,      /* termstat : terminal RX queue diagnostics */
+    TCMD_I2CSCAN,       /* i2cscan : scan I2C1 bus for devices */
+    TCMD_MPUWHO,        /* mpuwho : read MPU9250 WHO_AM_I register */
+    TCMD_MPUREGS,       /* mpuregs : read MPU9250 diagnostic registers */
+    TCMD_MPUWARM,       /* mpuwarm : probe before/after warm-up only */
+    TCMD_MPUINIT,       /* mpuinit : basic MPU6500/9250 init */
+    TCMD_MPUCFGTEST,    /* mpucfgtest : CONFIG register write/readback diagnostic */
+    TCMD_MPURAW,        /* mpuraw : one-shot raw accel/gyro/temperature read */
+    TCMD_MPUDDBGRAW,    /* mpudbgraw : update IMU debug variables for CubeIDE */
+    TCMD_MPUGYROTEST    /* mpugyrotest : gyro-specific diagnostic */
 } TerminalCommandType_t;
 
 /* ── Parse result ────────────────────────────────────────────────────────── */

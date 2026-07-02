@@ -1,2 +1,2 @@
-../Core/Src/app_main.c:26:6:App_Init	1
-../Core/Src/app_main.c:50:6:App_Update	4
+../Core/Src/app_main.c:30:6:App_Init	1
+../Core/Src/app_main.c:55:6:App_Update	8

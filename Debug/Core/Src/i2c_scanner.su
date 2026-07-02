@@ -1,0 +1,4 @@
+../Core/Src/i2c_scanner.c:16:19:I2C_Scanner_Probe7	32	static
+../Core/Src/i2c_scanner.c:31:6:I2C_ScanBus	40	static
+../Core/Src/i2c_scanner.c:64:6:I2C_Scanner_WarmupRange	32	static
+../Core/Src/i2c_scanner.c:88:19:I2C_Scanner_WarmupUntilFound	40	static

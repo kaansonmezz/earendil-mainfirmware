@@ -449,6 +449,69 @@ bool TerminalParser_Parse(const char *line, TerminalCommand_t *outResult)
         return true;
     }
 
+    /* ── 5c. i2cscan (I2C bus scanner) ─────────────────────────────── */
+    if (strcmp(buf, "i2cscan") == 0)
+    {
+        outResult->type = TCMD_I2CSCAN;
+        return true;
+    }
+
+    /* ── 5d. mpuwho (MPU9250 WHO_AM_I read) ───────────────────────── */
+    if (strcmp(buf, "mpuwho") == 0)
+    {
+        outResult->type = TCMD_MPUWHO;
+        return true;
+    }
+
+    /* ── 5e. mpuregs (MPU9250 diagnostic register dump) ────────────── */
+    if (strcmp(buf, "mpuregs") == 0)
+    {
+        outResult->type = TCMD_MPUREGS;
+        return true;
+    }
+
+    /* ── 5f. mpuwarm (MPU9250 warm-up probe only) ─────────────────── */
+    if (strcmp(buf, "mpuwarm") == 0)
+    {
+        outResult->type = TCMD_MPUWARM;
+        return true;
+    }
+
+    /* ── 5g. mpuinit (basic MPU6500/9250 init) ─────────────────────── */
+    if (strcmp(buf, "mpuinit") == 0)
+    {
+        outResult->type = TCMD_MPUINIT;
+        return true;
+    }
+
+    /* ── 5h. mpucfgtest (CONFIG register write/readback diagnostic) ── */
+    if (strcmp(buf, "mpucfgtest") == 0)
+    {
+        outResult->type = TCMD_MPUCFGTEST;
+        return true;
+    }
+
+    /* ── 5i. mpuraw (one-shot raw accel/gyro read) ─────────────────── */
+    if (strcmp(buf, "mpuraw") == 0)
+    {
+        outResult->type = TCMD_MPURAW;
+        return true;
+    }
+
+    /* ── 5j. mpudbgraw (update IMU debug variables for CubeIDE) ───── */
+    if (strcmp(buf, "mpudbgraw") == 0)
+    {
+        outResult->type = TCMD_MPUDDBGRAW;
+        return true;
+    }
+
+    /* ── 5k. mpugyrotest (gyro-specific diagnostic) ───────────────── */
+    if (strcmp(buf, "mpugyrotest") == 0)
+    {
+        outResult->type = TCMD_MPUGYROTEST;
+        return true;
+    }
+
     /* ── 6. m speed (control mode) ──────────────────────────────────── */
     if (strcmp(buf, "m speed") == 0)
     {

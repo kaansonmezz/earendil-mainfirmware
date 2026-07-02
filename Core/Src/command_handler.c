@@ -8,6 +8,8 @@
 #include "safety_manager.h"
 #include "terminal_if.h"
 #include "logger.h"
+#include "i2c_scanner.h"
+#include "imu_mpu9250.h"
 #include <string.h>
 
 /* ── Tunables ───────────────────────────────────────────────────────────────
@@ -220,6 +222,15 @@ void CommandHandler_PrintHelp(void)
     Logger_Log(LOG_INFO, "  identify         Arm motors, then send identify to all motor UARTs");
     Logger_Log(LOG_INFO, "  status           Send status to all motor UARTs");
     Logger_Log(LOG_INFO, "  termstat         Terminal RX queue diagnostics");
+    Logger_Log(LOG_INFO, "  i2cscan          Scan I2C1 bus for devices");
+    Logger_Log(LOG_INFO, "  mpuwho           Read MPU9250 WHO_AM_I register");
+    Logger_Log(LOG_INFO, "  mpuregs          Read MPU9250 diagnostic registers");
+    Logger_Log(LOG_INFO, "  mpuwarm          Probe before/after I2C warm-up only");
+    Logger_Log(LOG_INFO, "  mpuinit          Basic MPU6500/9250 init (reset, clock, accel/gyro)");
+    Logger_Log(LOG_INFO, "  mpucfgtest       CONFIG register write/readback diagnostic");
+    Logger_Log(LOG_INFO, "  mpuraw           One-shot raw accel/gyro/temperature read");
+    Logger_Log(LOG_INFO, "  mpudbgraw        Update IMU raw debug variables for CubeIDE");
+    Logger_Log(LOG_INFO, "  mpugyrotest      Diagnose gyro raw registers and gyro enable state");
     Logger_Log(LOG_INFO, "");
     Logger_Log(LOG_INFO, "Direct motor command:");
     Logger_Log(LOG_INFO, "  FL <text>        Send raw text only to Front Left motor");
@@ -263,10 +274,15 @@ void CommandHandler_Handle(const TerminalCommand_t *cmd)
             case TCMD_HELP:         /* help */
             case TCMD_STATUS:       /* status (query) */
             case TCMD_TERMSTAT:     /* termstat (query) */
-            case TCMD_MODE_QUERY:   /* mode (query) */
-            case TCMD_STOP:         /* stop (safe) */
-            case TCMD_BRAKE:        /* brake (safe) */
-            case TCMD_MOTOR_TUNE:   /* tuning: no motion, allowed in DISARM */
+            case TCMD_I2CSCAN:     /* i2cscan (query) */
+            case TCMD_MPUWHO:     /* mpuwho (query) */
+            case TCMD_MPUREGS:   /* mpuregs (query) */
+            case TCMD_MPUWARM:  /* mpuwarm (query) */
+            case TCMD_MPUINIT:  /* mpuinit (init) */
+            case TCMD_MPUCFGTEST: /* mpucfgtest (diagnostic) */
+            case TCMD_MPURAW: /* mpuraw (query) */
+            case TCMD_MPUDDBGRAW: /* mpudbgraw (query) */
+            case TCMD_MPUGYROTEST: /* mpugyrotest (diagnostic) */
                 allowed = true;
                 break;
 
@@ -391,6 +407,86 @@ void CommandHandler_Handle(const TerminalCommand_t *cmd)
                        (unsigned)TerminalIf_GetPendingLineCount(),
                        (unsigned)TerminalIf_GetMaxLineQueueDepth());
             break;
+
+        case TCMD_I2CSCAN:
+            I2C_ScanBus();
+            break;
+
+        case TCMD_MPUWHO:
+        {
+            extern I2C_HandleTypeDef hi2c1;
+            IMU_MPU9250_WhoAmI(&hi2c1);
+            break;
+        }
+
+        case TCMD_MPUREGS:
+        {
+            extern I2C_HandleTypeDef hi2c1;
+            IMU_MPU9250_WhoAmI(&hi2c1);
+            break;
+        }
+
+        case TCMD_MPUWARM:
+        {
+            extern I2C_HandleTypeDef hi2c1;
+            IMU_MPU9250_WarmupProbe(&hi2c1);
+            break;
+        }
+
+        case TCMD_MPUINIT:
+        {
+            extern I2C_HandleTypeDef hi2c1;
+            IMU_MPU9250_InitBasic(&hi2c1);
+            break;
+        }
+
+        case TCMD_MPUCFGTEST:
+        {
+            extern I2C_HandleTypeDef hi2c1;
+            IMU_MPU9250_CfgTest(&hi2c1);
+            break;
+        }
+
+        case TCMD_MPURAW:
+        {
+            extern I2C_HandleTypeDef hi2c1;
+            IMU_MPU9250_Raw_t raw;
+            HAL_StatusTypeDef st = IMU_MPU9250_ReadRaw(&hi2c1, &raw);
+            uint8_t ok = (st == HAL_OK) ? 1U : 0U;
+            IMU_MPU9250_UpdateDebugRaw(ok ? &raw : NULL, ok);
+            Logger_Log(LOG_INFO,
+                       "MPU_RAW,ACC_X:%d,ACC_Y:%d,ACC_Z:%d,"
+                       "TEMP:%d,GYRO_X:%d,GYRO_Y:%d,GYRO_Z:%d,OK:%u",
+                       (int)raw.acc_x, (int)raw.acc_y, (int)raw.acc_z,
+                       (int)raw.temp,
+                       (int)raw.gyro_x, (int)raw.gyro_y, (int)raw.gyro_z,
+                       ok);
+            break;
+        }
+
+        case TCMD_MPUDDBGRAW:
+        {
+            extern I2C_HandleTypeDef hi2c1;
+            IMU_MPU9250_Raw_t raw;
+            HAL_StatusTypeDef st = IMU_MPU9250_ReadRaw(&hi2c1, &raw);
+            uint8_t ok = (st == HAL_OK) ? 1U : 0U;
+            IMU_MPU9250_UpdateDebugRaw(ok ? &raw : NULL, ok);
+            Logger_Log(LOG_INFO,
+                       "MPU_DBGRAW,ACC_X:%d,ACC_Y:%d,ACC_Z:%d,"
+                       "TEMP:%d,GYRO_X:%d,GYRO_Y:%d,GYRO_Z:%d,OK:%u",
+                       (int)raw.acc_x, (int)raw.acc_y, (int)raw.acc_z,
+                       (int)raw.temp,
+                       (int)raw.gyro_x, (int)raw.gyro_y, (int)raw.gyro_z,
+                       ok);
+            break;
+        }
+
+        case TCMD_MPUGYROTEST:
+        {
+            extern I2C_HandleTypeDef hi2c1;
+            IMU_MPU9250_GyroTest(&hi2c1);
+            break;
+        }
 
         case TCMD_MOTOR_RAW:
         {
