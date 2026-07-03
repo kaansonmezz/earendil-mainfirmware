@@ -34,6 +34,18 @@ typedef struct
     int16_t gyro_z;
 } IMU_MPU9250_Raw_t;
 
+/* ── Converted sensor data (scaled integer) ──────────────────────────────── */
+typedef struct
+{
+    int32_t acc_x_mg;       /* milli-g  (1000 mg = 1 g)  */
+    int32_t acc_y_mg;
+    int32_t acc_z_mg;
+    int32_t temp_cx100;     /* centi-degC (100 = 1.00 C) */
+    int32_t gyro_x_mdps;    /* milli-dps (1000 mdps = 1 dps) */
+    int32_t gyro_y_mdps;
+    int32_t gyro_z_mdps;
+} IMU_MPU9250_Conv_t;
+
 /* ── Public API ──────────────────────────────────────────────────────────── */
 
 /* Returns true for supported WHO_AM_I values: 0x70, 0x71, 0x73. */
@@ -75,6 +87,11 @@ HAL_StatusTypeDef IMU_MPU9250_FindAndReadBytes(I2C_HandleTypeDef *hi2c,
                                                uint8_t start_reg,
                                                uint8_t *buf, uint16_t len);
 
+/* Verbose variant: logs MPU_FINDBURST for diagnostic commands (mpugyrotest). */
+HAL_StatusTypeDef IMU_MPU9250_FindAndReadBytesVerbose(I2C_HandleTypeDef *hi2c,
+                                                      uint8_t start_reg,
+                                                      uint8_t *buf, uint16_t len);
+
 /* One-shot raw accel/gyro/temperature read (14 bytes from 0x3B). */
 HAL_StatusTypeDef IMU_MPU9250_ReadRaw(I2C_HandleTypeDef *hi2c,
                                       IMU_MPU9250_Raw_t *raw);
@@ -84,6 +101,10 @@ void IMU_MPU9250_UpdateDebugRaw(const IMU_MPU9250_Raw_t *raw, uint8_t ok);
 
 /* Stage 5: gyro-specific diagnostic (clock source, config, raw registers). */
 void IMU_MPU9250_GyroTest(I2C_HandleTypeDef *hi2c);
+
+/* Stage 6: read and convert raw accel/gyro/temp to physical units. */
+HAL_StatusTypeDef IMU_MPU9250_ReadConverted(I2C_HandleTypeDef *hi2c,
+                                            IMU_MPU9250_Conv_t *conv);
 
 /* ── CubeIDE Live Expression debug variables (extern) ──────────────────────
  * Defined in imu_mpu9250.c as volatile with __attribute__((used)).

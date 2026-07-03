@@ -60,7 +60,8 @@ typedef enum
     TCMD_MPUCFGTEST,    /* mpucfgtest : CONFIG register write/readback diagnostic */
     TCMD_MPURAW,        /* mpuraw : one-shot raw accel/gyro/temperature read */
     TCMD_MPUDDBGRAW,    /* mpudbgraw : update IMU debug variables for CubeIDE */
-    TCMD_MPUGYROTEST    /* mpugyrotest : gyro-specific diagnostic */
+    TCMD_MPUGYROTEST,   /* mpugyrotest : gyro-specific diagnostic */
+    TCMD_MPUCONV        /* mpuconv : converted accel/gyro/temp in physical units */
 } TerminalCommandType_t;
 
 /* ── Parse result ────────────────────────────────────────────────────────── */

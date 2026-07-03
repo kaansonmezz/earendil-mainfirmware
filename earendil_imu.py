@@ -222,17 +222,18 @@ _RE_IMU_DATA = re.compile(
     r"^\[IMU\]\s+Roll:\s+([-\d.]+)\s+Pitch:\s+([-\d.]+)\s+Yaw:\s+([-\d.]+)$"
 )
 
-MPU_RAW_FIELDS = ("ACC_X", "ACC_Y", "ACC_Z", "TEMP",
-                   "GYRO_X", "GYRO_Y", "GYRO_Z", "OK")
+MPU_IMU_FIELDS = ("AX", "AY", "AZ", "GX", "GY", "GZ", "TC", "OK")
 
 
-def parse_mpu_raw_line(line: str) -> dict | None:
-    """Parse an MPU_RAW telemetry line and return a dict of int values.
+def parse_mpu_imu_line(line: str) -> dict | None:
+    """Parse an MPU_IMU compact converted telemetry line.
 
-    Works even if the line has prefixes like ``[RX-H7] [INFO]``.
-    Returns *None* if the line is not a valid MPU_RAW line.
+    Expected format (may have prefixes like ``[RX-H7] [INFO]``):
+        MPU_IMU,AX:-117,AY:-243,AZ:-981,GX:1313,GY:3855,GZ:2023,TC:2867,OK:1
+
+    Returns a dict of int values, or *None* if the line is not valid.
     """
-    if "MPU_RAW," not in line:
+    if "MPU_IMU," not in line:
         return None
     try:
         vals: dict[str, int] = {}
@@ -241,10 +242,9 @@ def parse_mpu_raw_line(line: str) -> dict | None:
                 k, v = part.split(":", 1)
                 k = k.strip()
                 v = v.strip()
-                if k in MPU_RAW_FIELDS:
+                if k in MPU_IMU_FIELDS:
                     vals[k] = int(v)
-        # Require at least ACC_X present to consider it valid.
-        if "ACC_X" not in vals:
+        if "AX" not in vals:
             return None
         return vals
     except (ValueError, KeyError):
@@ -595,10 +595,10 @@ class EarendilControlGui(QMainWindow):
         self._pending_mode_timer.setInterval(self.OP_MODE_CONFIRM_TIMEOUT_MS)
         self._pending_mode_timer.timeout.connect(self._on_pending_mode_timeout)
 
-        # ── MPU Raw "Last Update" age refresh (1 s) ───────────────────────
+        # ── MPU IMU "Last Update" age refresh (1 s) ───────────────────────
         self._mpu_age_timer = QTimer(self)
         self._mpu_age_timer.setInterval(1000)
-        self._mpu_age_timer.timeout.connect(self._tick_mpu_raw_age)
+        self._mpu_age_timer.timeout.connect(self._tick_mpu_imu_age)
 
         # Prevent buttons from stealing keyboard focus (Space must always reach keyPressEvent)
         for btn in self.findChildren(QPushButton):
@@ -823,28 +823,28 @@ class EarendilControlGui(QMainWindow):
     #   hook (_update_imu_values) is wired but a no-op until then.
     IMU_FIELDS = ("AX", "AY", "AZ", "GX", "GY", "GZ", "MX", "MY", "MZ")
 
-    # Labels shown in the MPU Raw panel, in display order.
-    _MPU_RAW_LABELS = (
-        ("ACC_X",  "Accel X"),
-        ("ACC_Y",  "Accel Y"),
-        ("ACC_Z",  "Accel Z"),
-        ("TEMP",   "Temp"),
-        ("GYRO_X", "Gyro X"),
-        ("GYRO_Y", "Gyro Y"),
-        ("GYRO_Z", "Gyro Z"),
+    # Labels shown in the IMU panel, in display order.
+    _MPU_IMU_LABELS = (
+        ("AX",     "Accel X"),
+        ("AY",     "Accel Y"),
+        ("AZ",     "Accel Z"),
+        ("GX",     "Gyro X"),
+        ("GY",     "Gyro Y"),
+        ("GZ",     "Gyro Z"),
+        ("TC",     "Temp"),
         ("STATUS", "Status"),
         ("AGE",    "Last Update"),
     )
 
     def _build_imu_group(self) -> QGroupBox:
-        grp = QGroupBox("IMU / MPU Raw")
+        grp = QGroupBox("IMU / MPU Converted")
         grp.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         outer = QVBoxLayout(grp)
         outer.setContentsMargins(8, 6, 8, 6)
         outer.setSpacing(6)
 
-        # ── MPU Raw panel (field/value grid) ────────────────────────────
-        grid = QTableWidget(len(self._MPU_RAW_LABELS), 2)
+        # ── IMU panel (field/value grid) ────────────────────────────────
+        grid = QTableWidget(len(self._MPU_IMU_LABELS), 2)
         grid.setHorizontalHeaderLabels(["Field", "Value"])
         grid.setVerticalHeaderLabels([])
         hdrs = grid.horizontalHeader()
@@ -856,22 +856,22 @@ class EarendilControlGui(QMainWindow):
         grid.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         grid.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
 
-        for row, (key, label) in enumerate(self._MPU_RAW_LABELS):
+        for row, (key, label) in enumerate(self._MPU_IMU_LABELS):
             grid.setItem(row, 0, QTableWidgetItem(label))
             grid.setItem(row, 1, QTableWidgetItem("--"))
 
-        for row in range(len(self._MPU_RAW_LABELS)):
+        for row in range(len(self._MPU_IMU_LABELS)):
             grid.setRowHeight(row, 18)
-        grid.setMaximumHeight(len(self._MPU_RAW_LABELS) * 18 + 30)
+        grid.setMaximumHeight(len(self._MPU_IMU_LABELS) * 18 + 30)
         outer.addWidget(grid)
-        self._mpu_raw_table = grid
+        self._mpu_imu_table = grid
 
         # Request button
         btn_row = QHBoxLayout()
         btn_row.setContentsMargins(0, 0, 0, 0)
-        self._btn_mpu_raw = QPushButton("Request IMU Raw")
-        self._btn_mpu_raw.clicked.connect(lambda: self._send_cmd("mpuraw"))
-        btn_row.addWidget(self._btn_mpu_raw)
+        self._btn_mpu_conv = QPushButton("Request IMU Conv")
+        self._btn_mpu_conv.clicked.connect(lambda: self._send_cmd("mpuconv"))
+        btn_row.addWidget(self._btn_mpu_conv)
         btn_row.addStretch()
         outer.addLayout(btn_row)
 
@@ -895,8 +895,8 @@ class EarendilControlGui(QMainWindow):
         outer.addWidget(self._imu_table)
 
         # Tracking state for "Last Update" display.
-        self._mpu_raw_last_ts: float | None = None
-        self._mpu_raw_data: dict[str, int] = {}
+        self._mpu_imu_last_ts: float | None = None
+        self._mpu_imu_data: dict[str, int] = {}
 
         return grp
 
@@ -915,45 +915,52 @@ class EarendilControlGui(QMainWindow):
             if item is not None:
                 item.setText(f"{values[field]:.2f}")
 
-    def _update_mpu_raw_panel(self, data: dict[str, int]):
-        """Refresh the MPU Raw panel with freshly parsed telemetry."""
-        self._mpu_raw_data = data
-        self._mpu_raw_last_ts = time.monotonic()
+    def _update_mpu_imu_panel(self, data: dict[str, int]):
+        """Refresh the IMU panel with freshly parsed MPU_IMU converted data."""
+        self._mpu_imu_data = data
+        self._mpu_imu_last_ts = time.monotonic()
 
         status_ok = data.get("OK", 0) == 1
         status_text = "OK" if status_ok else "FAIL"
 
+        def _mg_to_g(mg: int) -> str:
+            return f"{mg / 1000:.3f} g"
+
+        def _mdps_to_dps(mdps: int) -> str:
+            return f"{mdps / 1000:.3f} dps"
+
+        def _cx100_to_c(cx100: int) -> str:
+            return f"{cx100 / 100:.2f} °C"
+
         display = {
-            "ACC_X":  str(data.get("ACC_X", "--")),
-            "ACC_Y":  str(data.get("ACC_Y", "--")),
-            "ACC_Z":  str(data.get("ACC_Z", "--")),
-            "TEMP":   str(data.get("TEMP", "--")),
-            "GYRO_X": str(data.get("GYRO_X", "--")),
-            "GYRO_Y": str(data.get("GYRO_Y", "--")),
-            "GYRO_Z": str(data.get("GYRO_Z", "--")),
+            "AX":     _mg_to_g(data.get("AX", 0)),
+            "AY":     _mg_to_g(data.get("AY", 0)),
+            "AZ":     _mg_to_g(data.get("AZ", 0)),
+            "GX":     _mdps_to_dps(data.get("GX", 0)),
+            "GY":     _mdps_to_dps(data.get("GY", 0)),
+            "GZ":     _mdps_to_dps(data.get("GZ", 0)),
+            "TC":     _cx100_to_c(data.get("TC", 0)),
             "STATUS": status_text,
             "AGE":    "0.0 s",
         }
 
-        for row, (key, _label) in enumerate(self._MPU_RAW_LABELS):
-            item = self._mpu_raw_table.item(row, 1)
+        for row, (key, _label) in enumerate(self._MPU_IMU_LABELS):
+            item = self._mpu_imu_table.item(row, 1)
             if item is None:
                 continue
-            text = display.get(key, "--")
-            item.setText(text)
-            # Colour the STATUS cell.
+            item.setText(display.get(key, "--"))
             if key == "STATUS":
                 c = self._colors()
                 item.setForeground(
                     QColor(c['success_bright'] if status_ok else c['danger_bright'])
                 )
 
-    def _tick_mpu_raw_age(self):
+    def _tick_mpu_imu_age(self):
         """Called on a 1 s timer to keep 'Last Update' fresh."""
-        if self._mpu_raw_last_ts is None:
+        if self._mpu_imu_last_ts is None:
             return
-        elapsed = time.monotonic() - self._mpu_raw_last_ts
-        item = self._mpu_raw_table.item(8, 1)  # AGE row
+        elapsed = time.monotonic() - self._mpu_imu_last_ts
+        item = self._mpu_imu_table.item(8, 1)  # AGE row
         if item is not None:
             item.setText(f"{elapsed:.1f} s")
 
@@ -1411,17 +1418,17 @@ class EarendilControlGui(QMainWindow):
         self._parse_imu_line(line)
 
     def _parse_imu_line(self, line: str):
-        data = parse_mpu_raw_line(line)
-        if data is not None:
-            self._update_mpu_raw_panel(data)
-            # Also feed the 9-axis table with accel + gyro.
+        conv = parse_mpu_imu_line(line)
+        if conv is not None:
+            self._update_mpu_imu_panel(conv)
+            # Also feed the 9-axis table with converted values.
             self._update_imu_values({
-                "AX": float(data.get("ACC_X", 0)),
-                "AY": float(data.get("ACC_Y", 0)),
-                "AZ": float(data.get("ACC_Z", 0)),
-                "GX": float(data.get("GYRO_X", 0)),
-                "GY": float(data.get("GYRO_Y", 0)),
-                "GZ": float(data.get("GYRO_Z", 0)),
+                "AX": conv.get("AX", 0) / 1000.0,
+                "AY": conv.get("AY", 0) / 1000.0,
+                "AZ": conv.get("AZ", 0) / 1000.0,
+                "GX": conv.get("GX", 0) / 1000.0,
+                "GY": conv.get("GY", 0) / 1000.0,
+                "GZ": conv.get("GZ", 0) / 1000.0,
             })
             return
 

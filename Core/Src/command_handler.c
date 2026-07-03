@@ -231,6 +231,7 @@ void CommandHandler_PrintHelp(void)
     Logger_Log(LOG_INFO, "  mpuraw           One-shot raw accel/gyro/temperature read");
     Logger_Log(LOG_INFO, "  mpudbgraw        Update IMU raw debug variables for CubeIDE");
     Logger_Log(LOG_INFO, "  mpugyrotest      Diagnose gyro raw registers and gyro enable state");
+    Logger_Log(LOG_INFO, "  mpuconv           Read MPU accel/gyro/temp converted units");
     Logger_Log(LOG_INFO, "");
     Logger_Log(LOG_INFO, "Direct motor command:");
     Logger_Log(LOG_INFO, "  FL <text>        Send raw text only to Front Left motor");
@@ -283,6 +284,7 @@ void CommandHandler_Handle(const TerminalCommand_t *cmd)
             case TCMD_MPURAW: /* mpuraw (query) */
             case TCMD_MPUDDBGRAW: /* mpudbgraw (query) */
             case TCMD_MPUGYROTEST: /* mpugyrotest (diagnostic) */
+            case TCMD_MPUCONV: /* mpuconv (query) */
                 allowed = true;
                 break;
 
@@ -485,6 +487,34 @@ void CommandHandler_Handle(const TerminalCommand_t *cmd)
         {
             extern I2C_HandleTypeDef hi2c1;
             IMU_MPU9250_GyroTest(&hi2c1);
+            break;
+        }
+
+        case TCMD_MPUCONV:
+        {
+            extern I2C_HandleTypeDef hi2c1;
+            IMU_MPU9250_Conv_t conv;
+            HAL_StatusTypeDef st = IMU_MPU9250_ReadConverted(&hi2c1, &conv);
+            uint8_t ok = (st == HAL_OK) ? 1U : 0U;
+            Logger_Log(LOG_INFO,
+                       "MPU_CONV_MILLI,"
+                       "ACC_X_MG:%ld,ACC_Y_MG:%ld,ACC_Z_MG:%ld,"
+                       "TEMP_CX100:%ld,"
+                       "GYRO_X_MDPS:%ld,GYRO_Y_MDPS:%ld,GYRO_Z_MDPS:%ld,"
+                       "OK:%u",
+                       (long)conv.acc_x_mg, (long)conv.acc_y_mg, (long)conv.acc_z_mg,
+                       (long)conv.temp_cx100,
+                       (long)conv.gyro_x_mdps, (long)conv.gyro_y_mdps, (long)conv.gyro_z_mdps,
+                       ok);
+            Logger_Log(LOG_INFO,
+                       "MPU_IMU,"
+                       "AX:%ld,AY:%ld,AZ:%ld,"
+                       "GX:%ld,GY:%ld,GZ:%ld,"
+                       "TC:%ld,OK:%u",
+                       (long)conv.acc_x_mg, (long)conv.acc_y_mg, (long)conv.acc_z_mg,
+                       (long)conv.gyro_x_mdps, (long)conv.gyro_y_mdps, (long)conv.gyro_z_mdps,
+                       (long)conv.temp_cx100,
+                       ok);
             break;
         }
 

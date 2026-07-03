@@ -13,5 +13,7 @@
 ../Core/Src/imu_mpu9250.c:493:6:IMU_MPU9250_CfgTest	25
 ../Core/Src/imu_mpu9250.c:655:6:IMU_MPU9250_UpdateDebugRaw	3
 ../Core/Src/imu_mpu9250.c:678:19:IMU_MPU9250_FindAndReadBytes	8
-../Core/Src/imu_mpu9250.c:756:19:IMU_MPU9250_ReadRaw	2
-../Core/Src/imu_mpu9250.c:779:6:IMU_MPU9250_GyroTest	23
+../Core/Src/imu_mpu9250.c:726:19:IMU_MPU9250_FindAndReadBytesVerbose	8
+../Core/Src/imu_mpu9250.c:804:19:IMU_MPU9250_ReadRaw	2
+../Core/Src/imu_mpu9250.c:827:6:IMU_MPU9250_GyroTest	23
+../Core/Src/imu_mpu9250.c:1054:19:IMU_MPU9250_ReadConverted	5

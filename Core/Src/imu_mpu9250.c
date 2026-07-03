@@ -424,7 +424,7 @@ HAL_StatusTypeDef IMU_MPU9250_InitBasic(I2C_HandleTypeDef *hi2c)
     }
 
     /* d. Wake device, select clock source (REQUIRED) */
-    if (WriteAndVerify(hi2c, MPU9250_REG_PWR_MGMT_1, 0x01, "WAKE") != HAL_OK)
+    if (WriteAndVerify(hi2c, MPU9250_REG_PWR_MGMT_1, 0x00, "WAKE") != HAL_OK)
         return HAL_ERROR;
     HAL_Delay(10);
 
@@ -691,6 +691,54 @@ HAL_StatusTypeDef IMU_MPU9250_FindAndReadBytes(I2C_HandleTypeDef *hi2c,
         }
 
         if (probe != HAL_OK)
+            return HAL_ERROR;
+
+        /* Method A: HAL_I2C_Mem_Read burst */
+        hi2c->ErrorCode = HAL_I2C_ERROR_NONE;
+        HAL_StatusTypeDef mem_st = HAL_I2C_Mem_Read(hi2c, MPU9250_ADDR_HAL,
+                                                     start_reg,
+                                                     I2C_MEMADD_SIZE_8BIT,
+                                                     buf, len, 100);
+
+        if (mem_st == HAL_OK)
+            return HAL_OK;
+
+        /* Method B: manual register pointer write + Master_Receive */
+        hi2c->ErrorCode = HAL_I2C_ERROR_NONE;
+        HAL_StatusTypeDef tx_st = HAL_I2C_Master_Transmit(hi2c, MPU9250_ADDR_HAL,
+                                                           &start_reg, 1, 100);
+
+        HAL_StatusTypeDef rx_st = HAL_ERROR;
+        if (tx_st == HAL_OK)
+        {
+            hi2c->ErrorCode = HAL_I2C_ERROR_NONE;
+            rx_st = HAL_I2C_Master_Receive(hi2c, MPU9250_ADDR_HAL,
+                                            buf, len, 100);
+        }
+
+        uint8_t ok = (mem_st == HAL_OK || rx_st == HAL_OK) ? 1U : 0U;
+        return ok ? HAL_OK : HAL_ERROR;
+    }
+
+    return HAL_ERROR;
+}
+
+HAL_StatusTypeDef IMU_MPU9250_FindAndReadBytesVerbose(I2C_HandleTypeDef *hi2c,
+                                                      uint8_t start_reg,
+                                                      uint8_t *buf, uint16_t len)
+{
+    for (uint8_t addr = 0x03; addr <= 0x68; addr++)
+    {
+        uint32_t err = 0;
+        HAL_StatusTypeDef probe = I2C_Scanner_Probe7(hi2c, addr, &err);
+
+        if (addr < 0x68)
+        {
+            (void)probe;
+            continue;
+        }
+
+        if (probe != HAL_OK)
         {
             Logger_Log(LOG_INFO,
                        "MPU_FINDBURST_ABORT,REASON:TARGET_NOT_FOUND,"
@@ -827,9 +875,9 @@ void IMU_MPU9250_GyroTest(I2C_HandleTypeDef *hi2c)
         IMU_MPU9250_FindAndReadReg(hi2c, MPU9250_REG_PWR_MGMT_1, &pwr1_read);
 
         uint8_t gbuf[6];
-        HAL_StatusTypeDef gst = IMU_MPU9250_FindAndReadBytes(hi2c,
-                                                             MPU9250_REG_GYRO_XOUT_H,
-                                                             gbuf, 6);
+        HAL_StatusTypeDef gst = IMU_MPU9250_FindAndReadBytesVerbose(hi2c,
+                                                              MPU9250_REG_GYRO_XOUT_H,
+                                                              gbuf, 6);
         int16_t gx = 0, gy = 0, gz = 0;
         if (gst == HAL_OK)
         {
@@ -853,7 +901,7 @@ void IMU_MPU9250_GyroTest(I2C_HandleTypeDef *hi2c)
     /* ── Step 4: Raw 14-byte burst dump from 0x3B ────────────────────── */
     {
         uint8_t buf14[14];
-        HAL_StatusTypeDef st = IMU_MPU9250_FindAndReadBytes(hi2c,
+        HAL_StatusTypeDef st = IMU_MPU9250_FindAndReadBytesVerbose(hi2c,
                                                             MPU9250_REG_ACCEL_XOUT_H,
                                                             buf14, 14);
         Logger_Log(LOG_INFO,
@@ -870,7 +918,7 @@ void IMU_MPU9250_GyroTest(I2C_HandleTypeDef *hi2c)
     /* ── Step 5: Gyro-only burst read from 0x43 (6 bytes) ────────────── */
     {
         uint8_t gbuf[6];
-        HAL_StatusTypeDef st = IMU_MPU9250_FindAndReadBytes(hi2c,
+        HAL_StatusTypeDef st = IMU_MPU9250_FindAndReadBytesVerbose(hi2c,
                                                             MPU9250_REG_GYRO_XOUT_H,
                                                             gbuf, 6);
         int16_t gx = 0, gy = 0, gz = 0;
@@ -917,7 +965,7 @@ void IMU_MPU9250_GyroTest(I2C_HandleTypeDef *hi2c)
         for (int n = 0; n < 20; n++)
         {
             uint8_t gbuf[6];
-            HAL_StatusTypeDef st = IMU_MPU9250_FindAndReadBytes(hi2c,
+            HAL_StatusTypeDef st = IMU_MPU9250_FindAndReadBytesVerbose(hi2c,
                                                                 MPU9250_REG_GYRO_XOUT_H,
                                                                 gbuf, 6);
             int16_t gx = 0, gy = 0, gz = 0;
@@ -967,7 +1015,7 @@ void IMU_MPU9250_GyroTest(I2C_HandleTypeDef *hi2c)
             IMU_MPU9250_FindAndReadReg(hi2c, MPU9250_REG_GYRO_CONFIG, &readback);
 
             uint8_t gbuf[6];
-            HAL_StatusTypeDef gst = IMU_MPU9250_FindAndReadBytes(hi2c,
+            HAL_StatusTypeDef gst = IMU_MPU9250_FindAndReadBytesVerbose(hi2c,
                                                                  MPU9250_REG_GYRO_XOUT_H,
                                                                  gbuf, 6);
             int16_t gx = 0, gy = 0, gz = 0;
@@ -991,4 +1039,35 @@ void IMU_MPU9250_GyroTest(I2C_HandleTypeDef *hi2c)
     IMU_MPU9250_FindAndWriteReg(hi2c, MPU9250_REG_GYRO_CONFIG, 0x00);
 
     Logger_Log(LOG_INFO, "MPU_GYROTEST,DONE");
+}
+
+/* ── Stage 6: read and convert to physical units (scaled integer) ────────── */
+
+/* Conversion constants for current config:
+ *   ACCEL_CONFIG = 0x00 -> ±2g  -> 16384 LSB/g
+ *   GYRO_CONFIG  = 0x00 -> ±250 dps -> 131 LSB/dps
+ *   Temperature: temp_c = raw/333.87 + 21.0  (MPU6500/9250 family) */
+#define IMU_ACCEL_LSB_PER_G    16384
+#define IMU_GYRO_LSB_PER_DPS   131
+#define IMU_TEMP_DIV_X10000    33387   /* 333.87 * 100 */
+
+HAL_StatusTypeDef IMU_MPU9250_ReadConverted(I2C_HandleTypeDef *hi2c,
+                                            IMU_MPU9250_Conv_t *conv)
+{
+    IMU_MPU9250_Raw_t raw;
+    HAL_StatusTypeDef st = IMU_MPU9250_ReadRaw(hi2c, &raw);
+    if (st != HAL_OK)
+        return HAL_ERROR;
+
+    conv->acc_x_mg    = ((int32_t)raw.acc_x * 1000) / IMU_ACCEL_LSB_PER_G;
+    conv->acc_y_mg    = ((int32_t)raw.acc_y * 1000) / IMU_ACCEL_LSB_PER_G;
+    conv->acc_z_mg    = ((int32_t)raw.acc_z * 1000) / IMU_ACCEL_LSB_PER_G;
+
+    conv->temp_cx100  = (((int32_t)raw.temp * 10000) / IMU_TEMP_DIV_X10000) + 2100;
+
+    conv->gyro_x_mdps = ((int32_t)raw.gyro_x * 1000) / IMU_GYRO_LSB_PER_DPS;
+    conv->gyro_y_mdps = ((int32_t)raw.gyro_y * 1000) / IMU_GYRO_LSB_PER_DPS;
+    conv->gyro_z_mdps = ((int32_t)raw.gyro_z * 1000) / IMU_GYRO_LSB_PER_DPS;
+
+    return HAL_OK;
 }

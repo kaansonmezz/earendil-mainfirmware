@@ -7,4 +7,4 @@
 ../Core/Src/command_handler.c:129:13:WaitForTxDrain	24	static
 ../Core/Src/command_handler.c:140:13:HandleControlModeSwitch	24	static
 ../Core/Src/command_handler.c:191:6:CommandHandler_PrintHelp	8	static
-../Core/Src/command_handler.c:259:6:CommandHandler_Handle	96	static
+../Core/Src/command_handler.c:260:6:CommandHandler_Handle	128	static

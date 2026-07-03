@@ -81,28 +81,30 @@ void App_Update(void)
     SafetyManager_Update();
     MotorUartDma_Update();
 
-    /* ── Periodic IMU raw read (10 Hz) ──────────────────────────────── */
+    /* ── Periodic IMU converted read (10 Hz) ────────────────────────── */
     {
         uint32_t now = HAL_GetTick();
         if ((now - s_imuLastTick) >= IMU_READ_INTERVAL_MS)
         {
             s_imuLastTick = now;
             extern I2C_HandleTypeDef hi2c1;
-            IMU_MPU9250_Raw_t raw;
-            HAL_StatusTypeDef st = IMU_MPU9250_ReadRaw(&hi2c1, &raw);
+            IMU_MPU9250_Conv_t conv;
+            HAL_StatusTypeDef st = IMU_MPU9250_ReadConverted(&hi2c1, &conv);
             uint8_t ok = (st == HAL_OK) ? 1U : 0U;
-            IMU_MPU9250_UpdateDebugRaw(ok ? &raw : NULL, ok);
             if (ok)
             {
                 Logger_Log(LOG_INFO,
-                           "MPU_RAW,"
-                           "ACC_X:%d,ACC_Y:%d,ACC_Z:%d,"
-                           "TEMP:%d,"
-                           "GYRO_X:%d,GYRO_Y:%d,GYRO_Z:%d,"
-                           "OK:1",
-                           (int)raw.acc_x, (int)raw.acc_y, (int)raw.acc_z,
-                           (int)raw.temp,
-                           (int)raw.gyro_x, (int)raw.gyro_y, (int)raw.gyro_z);
+                           "MPU_IMU,"
+                           "AX:%ld,AY:%ld,AZ:%ld,"
+                           "GX:%ld,GY:%ld,GZ:%ld,"
+                           "TC:%ld,OK:1",
+                           (long)conv.acc_x_mg, (long)conv.acc_y_mg, (long)conv.acc_z_mg,
+                           (long)conv.gyro_x_mdps, (long)conv.gyro_y_mdps, (long)conv.gyro_z_mdps,
+                           (long)conv.temp_cx100);
+            }
+            else
+            {
+                Logger_Log(LOG_INFO, "MPU_IMU,AX:0,AY:0,AZ:0,GX:0,GY:0,GZ:0,TC:0,OK:0");
             }
         }
     }

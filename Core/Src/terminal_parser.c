@@ -512,6 +512,13 @@ bool TerminalParser_Parse(const char *line, TerminalCommand_t *outResult)
         return true;
     }
 
+    /* ── 5l. mpuconv (converted accel/gyro/temp in physical units) ── */
+    if (strcmp(buf, "mpuconv") == 0)
+    {
+        outResult->type = TCMD_MPUCONV;
+        return true;
+    }
+
     /* ── 6. m speed (control mode) ──────────────────────────────────── */
     if (strcmp(buf, "m speed") == 0)
     {
