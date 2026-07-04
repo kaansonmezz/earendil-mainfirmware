@@ -1212,11 +1212,14 @@ class EarendilControlGui(QMainWindow):
     # How long the GUI waits for an H7 confirmation of an operating-mode
     # command before warning that the mode change was not confirmed.
     OP_MODE_CONFIRM_TIMEOUT_MS = 3000
-    DEFAULT_RPM = 100
-    DEFAULT_PWM = 100
+    DEFAULT_RPM_FB = 30
+    DEFAULT_RPM_ROT = 100
+    DEFAULT_PWM_FB = 1000
+    DEFAULT_PWM_ROT = 2500
     RPM_MAX = 200
     PWM_MAX = 4000
     VALUE_STEP = 5
+    DUTY_STEP = 100
 
     # -- Motor table row index ---------------------------------------------
     MOTOR_ROW = {"FL": 0, "FR": 1, "RL": 2, "RR": 3}
@@ -1328,10 +1331,10 @@ class EarendilControlGui(QMainWindow):
         self.connected = False
 
         self.mode = "RPM"               # "RPM" or "DUTY"
-        self.fb_rpm = self.DEFAULT_RPM
-        self.rot_rpm = self.DEFAULT_RPM
-        self.fb_pwm = self.DEFAULT_PWM
-        self.rot_pwm = self.DEFAULT_PWM
+        self.fb_rpm = self.DEFAULT_RPM_FB
+        self.rot_rpm = self.DEFAULT_RPM_ROT
+        self.fb_pwm = self.DEFAULT_PWM_FB
+        self.rot_pwm = self.DEFAULT_PWM_ROT
 
         self._operating_mode = "disarm"          # confirmed mode (H7 is source of truth)
         self._pending_mode: str | None = None   # mode requested by user, awaiting H7 confirm
@@ -1401,7 +1404,15 @@ class EarendilControlGui(QMainWindow):
         left_layout.addLayout(mode_op_row)
 
         left_layout.addWidget(self._build_motor_table_group())
-        left_layout.addWidget(self._build_imu_group())
+
+        imu_env_row = QHBoxLayout()
+        imu_env_row.setContentsMargins(0, 0, 0, 0)
+        imu_env_row.setSpacing(8)
+        imu_env_row.addWidget(self._build_imu_group())
+        imu_env_row.addWidget(self._build_env_sensor_group())
+        imu_env_row.addStretch()
+        left_layout.addLayout(imu_env_row)
+
         left_layout.addStretch()
 
         splitter.addWidget(left_panel)
@@ -1718,7 +1729,7 @@ class EarendilControlGui(QMainWindow):
         self._imu_table.verticalHeader().setMaximumWidth(0)
         self._imu_table.setMinimumWidth(0)
         self._imu_table.setMaximumWidth(260)
-        self._imu_table.setMaximumHeight(108)
+        self._imu_table.setMaximumHeight(160)
         self._imu_table.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
 
         labels = ["Accel", "Gyro", "Mag", "Temp"]
@@ -1764,6 +1775,87 @@ class EarendilControlGui(QMainWindow):
         lay.addLayout(btn_row)
 
         return grp
+
+    # -- ENV Sensors placeholder -----------------------------------------------
+    _ENV_ROW = {
+        "Gas": 0, "Current": 1, "Temp": 2,
+        "Humidity": 3, "UV": 4, "Pressure": 5,
+    }
+    _ENV_LABELS = ["Gas", "Current", "Temp", "Humidity", "UV", "Pressure"]
+    _ENV_UNITS = ["Relative", "A", "°C", "%RH", "UV Index", "hPa"]
+
+    def _build_env_sensor_group(self) -> QGroupBox:
+        grp = QGroupBox("ENV Sensors")
+        grp.setSizePolicy(QSizePolicy.Maximum, QSizePolicy.Fixed)
+        grp.setStyleSheet("""
+            QGroupBox {
+                padding-bottom: 0px;
+                margin-bottom: 0px;
+            }
+        """)
+        lay = QVBoxLayout(grp)
+        lay.setContentsMargins(6, 4, 6, 0)
+        lay.setSpacing(0)
+
+        num_rows = len(self._ENV_LABELS)
+        self._env_table = QTableWidget(num_rows, 4)
+        self._env_table.setHorizontalHeaderLabels(["Sensor", "Value", "Unit", "Status"])
+        headers = self._env_table.horizontalHeader()
+        if headers:
+            headers.setSectionResizeMode(0, QHeaderView.Fixed)
+            headers.setSectionResizeMode(1, QHeaderView.Fixed)
+            headers.setSectionResizeMode(2, QHeaderView.Fixed)
+            headers.setSectionResizeMode(3, QHeaderView.Fixed)
+            headers.resizeSection(0, 70)
+            headers.resizeSection(1, 60)
+            headers.resizeSection(2, 70)
+            headers.resizeSection(3, 60)
+            headers.setFixedHeight(20)
+            headers.setSectionsMovable(False)
+            headers.setSortIndicatorShown(False)
+        self._env_table.verticalHeader().setVisible(False)
+        self._env_table.verticalHeader().setDefaultSectionSize(22)
+        self._env_table.verticalHeader().setMinimumWidth(0)
+        self._env_table.verticalHeader().setMaximumWidth(0)
+        self._env_table.setMinimumWidth(0)
+        self._env_table.setMaximumWidth(260)
+        self._env_table.setMaximumHeight(175)
+        self._env_table.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
+
+        for row in range(num_rows):
+            self._env_table.setItem(row, 0, QTableWidgetItem(self._ENV_LABELS[row]))
+            self._env_table.setItem(row, 1, QTableWidgetItem("--"))
+            self._env_table.setItem(row, 2, QTableWidgetItem(self._ENV_UNITS[row]))
+            self._env_table.setItem(row, 3, QTableWidgetItem("N/A"))
+
+        self._env_table.setEditTriggers(QTableWidget.NoEditTriggers)
+        self._env_table.setFocusPolicy(Qt.NoFocus)
+        self._env_table.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self._env_table.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self._env_table.verticalHeader().hide()
+        self._env_table.horizontalHeader().setStretchLastSection(False)
+        self._env_table.setStyleSheet("""
+            QTableWidget {
+                padding: 0px;
+                margin: 0px;
+                border: 1px solid palette(mid);
+                font-size: 12px;
+            }
+            QTableWidget::item {
+                padding: 3px 5px;
+            }
+            QHeaderView::section {
+                padding: 3px 5px;
+                font-size: 11px;
+            }
+        """)
+        lay.addWidget(self._env_table)
+        return grp
+
+    def _set_env_cell(self, row: int, col: int, text: str):
+        item = self._env_table.item(row, col)
+        if item is not None:
+            item.setText(text)
 
     def _set_imu_cell(self, row: int, col: int, text: str):
         item = self._imu_table.item(row, col)
@@ -2762,7 +2854,8 @@ class EarendilControlGui(QMainWindow):
                 self._lbl_fb_value.setText(str(self.fb_rpm))
                 self._log_info(f"FB RPM set to {self.fb_rpm}")
             else:
-                self.fb_pwm = max(0, min(self.PWM_MAX, self.fb_pwm + delta))
+                d = self.DUTY_STEP if delta > 0 else -self.DUTY_STEP
+                self.fb_pwm = max(0, min(self.PWM_MAX, self.fb_pwm + d))
                 self._lbl_fb_value.setText(str(self.fb_pwm))
                 self._log_info(f"FB PWM set to {self.fb_pwm}")
         else:
@@ -2771,7 +2864,8 @@ class EarendilControlGui(QMainWindow):
                 self._lbl_rot_value.setText(str(self.rot_rpm))
                 self._log_info(f"ROT RPM set to {self.rot_rpm}")
             else:
-                self.rot_pwm = max(0, min(self.PWM_MAX, self.rot_pwm + delta))
+                d = self.DUTY_STEP if delta > 0 else -self.DUTY_STEP
+                self.rot_pwm = max(0, min(self.PWM_MAX, self.rot_pwm + d))
                 self._lbl_rot_value.setText(str(self.rot_pwm))
                 self._log_info(f"ROT PWM set to {self.rot_pwm}")
 
