@@ -19,10 +19,8 @@
 
 /* ── Private state ────────────────────────────────────────────────────────── */
 static TerminalCommand_t s_parsedCmd;
-static uint32_t s_imuLastTick = 0U;
 
 #define TERMINAL_MAX_LINES_PER_UPDATE 16U
-#define IMU_READ_INTERVAL_MS          100U
 static char s_termLine[TERMINAL_RX_BUF_SIZE];
 
 /* ── Public functions ─────────────────────────────────────────────────────── */
@@ -81,33 +79,8 @@ void App_Update(void)
     SafetyManager_Update();
     MotorUartDma_Update();
 
-    /* ── Periodic IMU converted read (10 Hz) ────────────────────────── */
-    {
-        uint32_t now = HAL_GetTick();
-        if ((now - s_imuLastTick) >= IMU_READ_INTERVAL_MS)
-        {
-            s_imuLastTick = now;
-            extern I2C_HandleTypeDef hi2c1;
-            IMU_MPU9250_Conv_t conv;
-            HAL_StatusTypeDef st = IMU_MPU9250_ReadConverted(&hi2c1, &conv);
-            uint8_t ok = (st == HAL_OK) ? 1U : 0U;
-            if (ok)
-            {
-                Logger_Log(LOG_INFO,
-                           "MPU_IMU,"
-                           "AX:%ld,AY:%ld,AZ:%ld,"
-                           "GX:%ld,GY:%ld,GZ:%ld,"
-                           "TC:%ld,OK:1",
-                           (long)conv.acc_x_mg, (long)conv.acc_y_mg, (long)conv.acc_z_mg,
-                           (long)conv.gyro_x_mdps, (long)conv.gyro_y_mdps, (long)conv.gyro_z_mdps,
-                           (long)conv.temp_cx100);
-            }
-            else
-            {
-                Logger_Log(LOG_INFO, "MPU_IMU,AX:0,AY:0,AZ:0,GX:0,GY:0,GZ:0,TC:0,OK:0");
-            }
-        }
-    }
+    /* ── Periodic IMU stream (non-blocking) ───────────────────────── */
+    IMU_StreamTask();
 
     /* NOTE: DISARM is a logical safety lock only — the CPU is never put into
      * WFI/STOP/STANDBY.  The main loop always runs at full speed so SWD debug

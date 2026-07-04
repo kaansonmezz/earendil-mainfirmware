@@ -6,6 +6,7 @@
 "./Core/Src/i2c_scanner.o"
 "./Core/Src/imu_mpu9250.o"
 "./Core/Src/logger.o"
+"./Core/Src/mag_qmc5883p.o"
 "./Core/Src/main.o"
 "./Core/Src/motion_controller.o"
 "./Core/Src/motor_dispatcher.o"

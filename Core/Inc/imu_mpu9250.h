@@ -106,6 +106,36 @@ void IMU_MPU9250_GyroTest(I2C_HandleTypeDef *hi2c);
 HAL_StatusTypeDef IMU_MPU9250_ReadConverted(I2C_HandleTypeDef *hi2c,
                                             IMU_MPU9250_Conv_t *conv);
 
+/* Gyro bias control API. */
+void    IMU_MPU9250_BiasQuery(void);
+void    IMU_MPU9250_BiasEnable(void);
+void    IMU_MPU9250_BiasDisable(void);
+void    IMU_MPU9250_BiasClear(void);
+uint8_t IMU_MPU9250_BiasIsEnabled(void);
+uint8_t IMU_MPU9250_BiasGetSource(void);
+int16_t IMU_MPU9250_BiasGetX(void);
+int16_t IMU_MPU9250_BiasGetY(void);
+int16_t IMU_MPU9250_BiasGetZ(void);
+
+/* IMU stream control API. */
+void     IMU_StreamOn(void);
+void     IMU_StreamOff(void);
+void     IMU_StreamSetPeriod(uint32_t ms);
+uint32_t IMU_StreamGetPeriod(void);
+uint8_t  IMU_StreamIsEnabled(void);
+void     IMU_StreamTask(void);
+
+/* Gyro output filter API (LPF + deadband, display-only). */
+void     IMU_GyroFilterOn(void);
+void     IMU_GyroFilterOff(void);
+void     IMU_GyroFilterStatus(void);
+void     IMU_GyroFilterSetDeadband(int32_t mdps);
+void     IMU_GyroFilterSetLpfAlpha(int32_t alpha_permille);
+uint8_t  IMU_GyroFilterIsEnabled(void);
+int32_t  IMU_GyroFilterGetDeadband(void);
+int32_t  IMU_GyroFilterGetLpfAlpha(void);
+void     IMU_ApplyGyroFilter(int32_t *gx_mdps, int32_t *gy_mdps, int32_t *gz_mdps);
+
 /* ── CubeIDE Live Expression debug variables (extern) ──────────────────────
  * Defined in imu_mpu9250.c as volatile with __attribute__((used)).
  * Add these to CubeIDE Live Expressions to watch raw IMU values. */

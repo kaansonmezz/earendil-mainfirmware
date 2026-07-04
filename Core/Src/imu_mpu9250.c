@@ -3,6 +3,7 @@
 
 #include "imu_mpu9250.h"
 #include "i2c_scanner.h"
+#include "mag_qmc5883p.h"
 #include "logger.h"
 
 #define MPU_I2C_TIMEOUT_MS  50U
@@ -1051,6 +1052,18 @@ void IMU_MPU9250_GyroTest(I2C_HandleTypeDef *hi2c)
 #define IMU_GYRO_LSB_PER_DPS   131
 #define IMU_TEMP_DIV_X10000    33387   /* 333.87 * 100 */
 
+/* ── Static gyro bias (raw LSB, measured stationary) ──────────────────────── */
+#define IMU_GYRO_STATIC_BIAS_X_RAW   178
+#define IMU_GYRO_STATIC_BIAS_Y_RAW   512
+#define IMU_GYRO_STATIC_BIAS_Z_RAW   249
+
+static int16_t imu_gyro_bias_x = IMU_GYRO_STATIC_BIAS_X_RAW;
+static int16_t imu_gyro_bias_y = IMU_GYRO_STATIC_BIAS_Y_RAW;
+static int16_t imu_gyro_bias_z = IMU_GYRO_STATIC_BIAS_Z_RAW;
+
+static uint8_t imu_gyro_bias_enabled = 1;
+static uint8_t imu_gyro_bias_source  = 1;  /* 0=none, 1=static, 2=runtime */
+
 HAL_StatusTypeDef IMU_MPU9250_ReadConverted(I2C_HandleTypeDef *hi2c,
                                             IMU_MPU9250_Conv_t *conv)
 {
@@ -1065,9 +1078,266 @@ HAL_StatusTypeDef IMU_MPU9250_ReadConverted(I2C_HandleTypeDef *hi2c,
 
     conv->temp_cx100  = (((int32_t)raw.temp * 10000) / IMU_TEMP_DIV_X10000) + 2100;
 
-    conv->gyro_x_mdps = ((int32_t)raw.gyro_x * 1000) / IMU_GYRO_LSB_PER_DPS;
-    conv->gyro_y_mdps = ((int32_t)raw.gyro_y * 1000) / IMU_GYRO_LSB_PER_DPS;
-    conv->gyro_z_mdps = ((int32_t)raw.gyro_z * 1000) / IMU_GYRO_LSB_PER_DPS;
+    int32_t gx_corr = raw.gyro_x;
+    int32_t gy_corr = raw.gyro_y;
+    int32_t gz_corr = raw.gyro_z;
+
+    if (imu_gyro_bias_enabled)
+    {
+        gx_corr -= imu_gyro_bias_x;
+        gy_corr -= imu_gyro_bias_y;
+        gz_corr -= imu_gyro_bias_z;
+    }
+
+    conv->gyro_x_mdps = (gx_corr * 1000) / IMU_GYRO_LSB_PER_DPS;
+    conv->gyro_y_mdps = (gy_corr * 1000) / IMU_GYRO_LSB_PER_DPS;
+    conv->gyro_z_mdps = (gz_corr * 1000) / IMU_GYRO_LSB_PER_DPS;
 
     return HAL_OK;
+}
+
+/* ── Gyro bias control API ────────────────────────────────────────────────── */
+
+void IMU_MPU9250_BiasQuery(void)
+{
+    Logger_Log(LOG_INFO,
+               "MPU_BIAS,EN:%u,SRC:%u,X:%d,Y:%d,Z:%d,OK:1",
+               imu_gyro_bias_enabled, imu_gyro_bias_source,
+               (int)imu_gyro_bias_x, (int)imu_gyro_bias_y, (int)imu_gyro_bias_z);
+}
+
+void IMU_MPU9250_BiasEnable(void)
+{
+    imu_gyro_bias_enabled = 1;
+    Logger_Log(LOG_INFO, "MPU_BIAS_CMD,EN:1,OK:1");
+}
+
+void IMU_MPU9250_BiasDisable(void)
+{
+    imu_gyro_bias_enabled = 0;
+    Logger_Log(LOG_INFO, "MPU_BIAS_CMD,EN:0,OK:1");
+}
+
+void IMU_MPU9250_BiasClear(void)
+{
+    imu_gyro_bias_x = 0;
+    imu_gyro_bias_y = 0;
+    imu_gyro_bias_z = 0;
+    imu_gyro_bias_source = 0;
+    Logger_Log(LOG_INFO, "MPU_BIAS_CMD,CLEAR,X:0,Y:0,Z:0,SRC:0,OK:1");
+}
+
+uint8_t IMU_MPU9250_BiasIsEnabled(void)
+{
+    return imu_gyro_bias_enabled;
+}
+
+uint8_t IMU_MPU9250_BiasGetSource(void)
+{
+    return imu_gyro_bias_source;
+}
+
+int16_t IMU_MPU9250_BiasGetX(void)
+{
+    return imu_gyro_bias_x;
+}
+
+int16_t IMU_MPU9250_BiasGetY(void)
+{
+    return imu_gyro_bias_y;
+}
+
+int16_t IMU_MPU9250_BiasGetZ(void)
+{
+    return imu_gyro_bias_z;
+}
+
+/* ── IMU stream control ───────────────────────────────────────────────────── */
+
+static uint8_t  imu_stream_enabled   = 1;
+static uint32_t imu_stream_period_ms = 20;
+static uint32_t imu_stream_last_tick = 0;
+
+/* ── Gyro output filter (LPF + deadband, display-only) ────────────────────── */
+
+#define IMU_GYRO_DEADBAND_DEFAULT_MDPS        250
+#define IMU_GYRO_DEADBAND_MIN_MDPS            0
+#define IMU_GYRO_DEADBAND_MAX_MDPS            2000
+
+#define IMU_GYRO_LPF_ALPHA_DEFAULT_PERMILLE   250
+#define IMU_GYRO_LPF_ALPHA_MIN_PERMILLE       1
+#define IMU_GYRO_LPF_ALPHA_MAX_PERMILLE       1000
+
+static uint8_t  imu_gyro_filter_enabled       = 1;
+static int32_t  imu_gyro_deadband_mdps        = IMU_GYRO_DEADBAND_DEFAULT_MDPS;
+static int32_t  imu_gyro_lpf_alpha_permille   = IMU_GYRO_LPF_ALPHA_DEFAULT_PERMILLE;
+
+static uint8_t  imu_gyro_lpf_initialized = 0;
+static int32_t  imu_gyro_lpf_x_mdps = 0;
+static int32_t  imu_gyro_lpf_y_mdps = 0;
+static int32_t  imu_gyro_lpf_z_mdps = 0;
+
+static void IMU_ApplyGyroOutputFilter(int32_t *gx_mdps, int32_t *gy_mdps, int32_t *gz_mdps)
+{
+    if (!imu_gyro_filter_enabled)
+        return;
+
+    if (!imu_gyro_lpf_initialized)
+    {
+        imu_gyro_lpf_x_mdps = *gx_mdps;
+        imu_gyro_lpf_y_mdps = *gy_mdps;
+        imu_gyro_lpf_z_mdps = *gz_mdps;
+        imu_gyro_lpf_initialized = 1;
+    }
+    else
+    {
+        imu_gyro_lpf_x_mdps += (imu_gyro_lpf_alpha_permille * (*gx_mdps - imu_gyro_lpf_x_mdps)) / 1000;
+        imu_gyro_lpf_y_mdps += (imu_gyro_lpf_alpha_permille * (*gy_mdps - imu_gyro_lpf_y_mdps)) / 1000;
+        imu_gyro_lpf_z_mdps += (imu_gyro_lpf_alpha_permille * (*gz_mdps - imu_gyro_lpf_z_mdps)) / 1000;
+    }
+
+    *gx_mdps = imu_gyro_lpf_x_mdps;
+    *gy_mdps = imu_gyro_lpf_y_mdps;
+    *gz_mdps = imu_gyro_lpf_z_mdps;
+
+    if (*gx_mdps > -imu_gyro_deadband_mdps && *gx_mdps < imu_gyro_deadband_mdps)
+        *gx_mdps = 0;
+    if (*gy_mdps > -imu_gyro_deadband_mdps && *gy_mdps < imu_gyro_deadband_mdps)
+        *gy_mdps = 0;
+    if (*gz_mdps > -imu_gyro_deadband_mdps && *gz_mdps < imu_gyro_deadband_mdps)
+        *gz_mdps = 0;
+}
+
+void IMU_GyroFilterOn(void)
+{
+    imu_gyro_filter_enabled = 1;
+    imu_gyro_lpf_initialized = 0;
+    Logger_Log(LOG_INFO, "IMU_GYROFILTER,EN:1,DEADBAND_MDPS:%ld,LPF_ALPHA_PERMILLE:%ld,OK:1",
+               (long)imu_gyro_deadband_mdps, (long)imu_gyro_lpf_alpha_permille);
+}
+
+void IMU_GyroFilterOff(void)
+{
+    imu_gyro_filter_enabled = 0;
+    Logger_Log(LOG_INFO, "IMU_GYROFILTER,EN:0,OK:1");
+}
+
+void IMU_GyroFilterStatus(void)
+{
+    Logger_Log(LOG_INFO, "IMU_GYROFILTER,EN:%u,DEADBAND_MDPS:%ld,LPF_ALPHA_PERMILLE:%ld,OK:1",
+               imu_gyro_filter_enabled,
+               (long)imu_gyro_deadband_mdps, (long)imu_gyro_lpf_alpha_permille);
+}
+
+void IMU_GyroFilterSetDeadband(int32_t mdps)
+{
+    if (mdps < IMU_GYRO_DEADBAND_MIN_MDPS || mdps > IMU_GYRO_DEADBAND_MAX_MDPS)
+    {
+        Logger_Log(LOG_INFO, "IMU_DEADBAND,ERR:RANGE,MIN:%d,MAX:%d,OK:0",
+                   IMU_GYRO_DEADBAND_MIN_MDPS, IMU_GYRO_DEADBAND_MAX_MDPS);
+        return;
+    }
+    imu_gyro_deadband_mdps = mdps;
+    Logger_Log(LOG_INFO, "IMU_DEADBAND,MDPS:%ld,OK:1", (long)mdps);
+}
+
+void IMU_GyroFilterSetLpfAlpha(int32_t alpha_permille)
+{
+    if (alpha_permille < IMU_GYRO_LPF_ALPHA_MIN_PERMILLE || alpha_permille > IMU_GYRO_LPF_ALPHA_MAX_PERMILLE)
+    {
+        Logger_Log(LOG_INFO, "IMU_LPF,ERR:RANGE,MIN:%d,MAX:%d,OK:0",
+                   IMU_GYRO_LPF_ALPHA_MIN_PERMILLE, IMU_GYRO_LPF_ALPHA_MAX_PERMILLE);
+        return;
+    }
+    imu_gyro_lpf_alpha_permille = alpha_permille;
+    Logger_Log(LOG_INFO, "IMU_LPF,ALPHA_PERMILLE:%ld,OK:1", (long)alpha_permille);
+}
+
+uint8_t  IMU_GyroFilterIsEnabled(void)      { return imu_gyro_filter_enabled; }
+int32_t  IMU_GyroFilterGetDeadband(void)    { return imu_gyro_deadband_mdps; }
+int32_t  IMU_GyroFilterGetLpfAlpha(void)    { return imu_gyro_lpf_alpha_permille; }
+
+void IMU_ApplyGyroFilter(int32_t *gx_mdps, int32_t *gy_mdps, int32_t *gz_mdps)
+{
+    IMU_ApplyGyroOutputFilter(gx_mdps, gy_mdps, gz_mdps);
+}
+
+void IMU_StreamOn(void)
+{
+    imu_stream_enabled   = 1;
+    imu_stream_last_tick = HAL_GetTick();
+    Logger_Log(LOG_INFO, "IMU_STREAM,EN:1,PERIOD_MS:%lu,OK:1",
+               (unsigned long)imu_stream_period_ms);
+}
+
+void IMU_StreamOff(void)
+{
+    imu_stream_enabled = 0;
+    Logger_Log(LOG_INFO, "IMU_STREAM,EN:0,OK:1");
+}
+
+void IMU_StreamSetPeriod(uint32_t ms)
+{
+    if (ms < 20U || ms > 5000U)
+    {
+        Logger_Log(LOG_INFO, "IMU_TELPER,ERR:RANGE,MIN:20,MAX:5000,OK:0");
+        return;
+    }
+    imu_stream_period_ms = ms;
+    Logger_Log(LOG_INFO, "IMU_TELPER,PERIOD_MS:%lu,OK:1", (unsigned long)ms);
+}
+
+uint32_t IMU_StreamGetPeriod(void)
+{
+    return imu_stream_period_ms;
+}
+
+uint8_t IMU_StreamIsEnabled(void)
+{
+    return imu_stream_enabled;
+}
+
+void IMU_StreamTask(void)
+{
+    if (!imu_stream_enabled)
+        return;
+
+    uint32_t now = HAL_GetTick();
+    if ((now - imu_stream_last_tick) < imu_stream_period_ms)
+        return;
+
+    imu_stream_last_tick = now;
+
+    extern I2C_HandleTypeDef hi2c1;
+    IMU_MPU9250_Conv_t conv;
+    HAL_StatusTypeDef st = IMU_MPU9250_ReadConverted(&hi2c1, &conv);
+    uint8_t ok = (st == HAL_OK) ? 1U : 0U;
+
+    if (ok)
+    {
+        int32_t gx = conv.gyro_x_mdps;
+        int32_t gy = conv.gyro_y_mdps;
+        int32_t gz = conv.gyro_z_mdps;
+        IMU_ApplyGyroOutputFilter(&gx, &gy, &gz);
+
+        Logger_Log(LOG_INFO,
+                   "MPU_IMU,"
+                   "AX:%ld,AY:%ld,AZ:%ld,"
+                   "GX:%ld,GY:%ld,GZ:%ld,"
+                   "TC:%ld,BIAS:%u,BSRC:%u,GFILT:%u,GDB:%ld,GLPF:%ld,OK:1",
+                   (long)conv.acc_x_mg, (long)conv.acc_y_mg, (long)conv.acc_z_mg,
+                   (long)gx, (long)gy, (long)gz,
+                   (long)conv.temp_cx100,
+                   IMU_MPU9250_BiasIsEnabled(), IMU_MPU9250_BiasGetSource(),
+                   imu_gyro_filter_enabled,
+                   (long)imu_gyro_deadband_mdps, (long)imu_gyro_lpf_alpha_permille);
+
+        /* Also print magnetometer telemetry if available */
+        static MAG_QMC5883P_Handle_t mag_handle = {0};
+        MAG_QMC5883P_ReadImu(&hi2c1, &mag_handle);
+    }
+    else
+    {
+        Logger_Log(LOG_INFO, "MPU_IMU,OK:0");
+    }
 }

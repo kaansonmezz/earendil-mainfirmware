@@ -519,6 +519,200 @@ bool TerminalParser_Parse(const char *line, TerminalCommand_t *outResult)
         return true;
     }
 
+    /* ── 5m. mpubias (query gyro bias state) ──────────────────────── */
+    if (strcmp(buf, "mpubias") == 0)
+    {
+        outResult->type = TCMD_MPUBIAS;
+        return true;
+    }
+
+    /* ── 5n. mpubiason (enable gyro bias correction) ──────────────── */
+    if (strcmp(buf, "mpubiason") == 0)
+    {
+        outResult->type = TCMD_MPUBIASON;
+        return true;
+    }
+
+    /* ── 5o. mpubiasoff (disable gyro bias correction) ────────────── */
+    if (strcmp(buf, "mpubiasoff") == 0)
+    {
+        outResult->type = TCMD_MPUBIASOFF;
+        return true;
+    }
+
+    /* ── 5p. mpubiasclear (clear gyro bias to zero) ───────────────── */
+    if (strcmp(buf, "mpubiasclear") == 0)
+    {
+        outResult->type = TCMD_MPUBIASCLEAR;
+        return true;
+    }
+
+    /* ── 5q. imu <subcommand> ─────────────────────────────────────── */
+    if (strncmp(buf, "imu ", 4) == 0)
+    {
+        const char *rest = buf + 4;
+        while (*rest == ' ')
+            rest++;
+
+        if (strcmp(rest, "help") == 0)
+        {
+            outResult->type = TCMD_IMU_HELP;
+            return true;
+        }
+
+        if (strcmp(rest, "stream on") == 0)
+        {
+            outResult->type = TCMD_IMU_STREAM_ON;
+            return true;
+        }
+
+        if (strcmp(rest, "stream off") == 0)
+        {
+            outResult->type = TCMD_IMU_STREAM_OFF;
+            return true;
+        }
+
+        /* imu telper <ms> */
+        if (strncmp(rest, "telper ", 7) == 0)
+        {
+            const char *valStr = rest + 7;
+            while (*valStr == ' ')
+                valStr++;
+            if (*valStr == '\0')
+            {
+                outResult->type = TCMD_IMU_TELPER;
+                outResult->value = 0;
+                outResult->hasValue = false;
+                return true;
+            }
+            if (!allDigits(valStr))
+            {
+                outResult->type = TCMD_IMU_TELPER;
+                outResult->value = 0;
+                outResult->hasValue = false;
+                return true;
+            }
+            outResult->type = TCMD_IMU_TELPER;
+            outResult->value = (uint16_t)atoi(valStr);
+            outResult->hasValue = true;
+            return true;
+        }
+
+        /* imu gyrofilter status / on / off */
+        if (strncmp(rest, "gyrofilter ", 11) == 0)
+        {
+            const char *sub = rest + 11;
+            while (*sub == ' ')
+                sub++;
+
+            if (strcmp(sub, "status") == 0)
+            {
+                outResult->type = TCMD_IMU_GYROFILTER_STATUS;
+                return true;
+            }
+            if (strcmp(sub, "on") == 0)
+            {
+                outResult->type = TCMD_IMU_GYROFILTER_ON;
+                return true;
+            }
+            if (strcmp(sub, "off") == 0)
+            {
+                outResult->type = TCMD_IMU_GYROFILTER_OFF;
+                return true;
+            }
+            return false;
+        }
+
+        /* imu deadband <mdps> */
+        if (strncmp(rest, "deadband ", 9) == 0)
+        {
+            const char *valStr = rest + 9;
+            while (*valStr == ' ')
+                valStr++;
+            if (*valStr == '\0')
+            {
+                outResult->type = TCMD_IMU_DEADBAND;
+                outResult->value = 0;
+                outResult->hasValue = false;
+                return true;
+            }
+            if (!allDigits(valStr))
+            {
+                outResult->type = TCMD_IMU_DEADBAND;
+                outResult->value = 0;
+                outResult->hasValue = false;
+                return true;
+            }
+            outResult->type = TCMD_IMU_DEADBAND;
+            outResult->value = (uint16_t)atoi(valStr);
+            outResult->hasValue = true;
+            return true;
+        }
+
+        /* imu lpf <alpha_permille> */
+        if (strncmp(rest, "lpf ", 4) == 0)
+        {
+            const char *valStr = rest + 4;
+            while (*valStr == ' ')
+                valStr++;
+            if (*valStr == '\0')
+            {
+                outResult->type = TCMD_IMU_LPF;
+                outResult->value = 0;
+                outResult->hasValue = false;
+                return true;
+            }
+            if (!allDigits(valStr))
+            {
+                outResult->type = TCMD_IMU_LPF;
+                outResult->value = 0;
+                outResult->hasValue = false;
+                return true;
+            }
+            outResult->type = TCMD_IMU_LPF;
+            outResult->value = (uint16_t)atoi(valStr);
+            outResult->hasValue = true;
+            return true;
+        }
+
+        return false;
+    }
+
+    /* ── 5r. magwho (QMC5883P WHO_AM_I read) ────────────────────── */
+    if (strcmp(buf, "magwho") == 0)
+    {
+        outResult->type = TCMD_MAGWHO;
+        return true;
+    }
+
+    /* ── 5s. maginit (QMC5883P init) ────────────────────────────── */
+    if (strcmp(buf, "maginit") == 0)
+    {
+        outResult->type = TCMD_MAGINIT;
+        return true;
+    }
+
+    /* ── 5t. magraw (QMC5883P raw read) ────────────────────────── */
+    if (strcmp(buf, "magraw") == 0)
+    {
+        outResult->type = TCMD_MAGRAW;
+        return true;
+    }
+
+    /* ── 5u. magimu (QMC5883P compact IMU read) ────────────────── */
+    if (strcmp(buf, "magimu") == 0)
+    {
+        outResult->type = TCMD_MAGIMU;
+        return true;
+    }
+
+    /* ── 5v. maghelp (magnetometer help) ────────────────────────── */
+    if (strcmp(buf, "maghelp") == 0)
+    {
+        outResult->type = TCMD_MAGHELP;
+        return true;
+    }
+
     /* ── 6. m speed (control mode) ──────────────────────────────────── */
     if (strcmp(buf, "m speed") == 0)
     {

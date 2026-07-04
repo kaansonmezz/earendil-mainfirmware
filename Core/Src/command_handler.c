@@ -10,6 +10,7 @@
 #include "logger.h"
 #include "i2c_scanner.h"
 #include "imu_mpu9250.h"
+#include "mag_qmc5883p.h"
 #include <string.h>
 
 /* ── Tunables ───────────────────────────────────────────────────────────────
@@ -232,6 +233,26 @@ void CommandHandler_PrintHelp(void)
     Logger_Log(LOG_INFO, "  mpudbgraw        Update IMU raw debug variables for CubeIDE");
     Logger_Log(LOG_INFO, "  mpugyrotest      Diagnose gyro raw registers and gyro enable state");
     Logger_Log(LOG_INFO, "  mpuconv           Read MPU accel/gyro/temp converted units");
+    Logger_Log(LOG_INFO, "  mpubias           Query gyro static bias state");
+    Logger_Log(LOG_INFO, "  mpubiason         Enable gyro bias correction");
+    Logger_Log(LOG_INFO, "  mpubiasoff        Disable gyro bias correction");
+    Logger_Log(LOG_INFO, "  mpubiasclear      Clear gyro bias to zero");
+    Logger_Log(LOG_INFO, "  imu help           Show IMU command list");
+    Logger_Log(LOG_INFO, "  imu stream on      Enable periodic IMU telemetry");
+    Logger_Log(LOG_INFO, "  imu stream off     Disable periodic IMU telemetry");
+    Logger_Log(LOG_INFO, "  imu telper <ms>    Set IMU telemetry period (20..5000)");
+    Logger_Log(LOG_INFO, "  imu gyrofilter status  Show gyro output filter settings");
+    Logger_Log(LOG_INFO, "  imu gyrofilter on      Enable gyro output filter");
+    Logger_Log(LOG_INFO, "  imu gyrofilter off     Disable gyro output filter");
+    Logger_Log(LOG_INFO, "  imu deadband <mdps>    Set gyro display deadband (0..2000)");
+    Logger_Log(LOG_INFO, "  imu lpf <permille>     Set gyro EMA alpha (1..1000)");
+    Logger_Log(LOG_INFO, "");
+    Logger_Log(LOG_INFO, "Magnetometer commands:");
+    Logger_Log(LOG_INFO, "  magwho              Detect QMC5883P magnetometer");
+    Logger_Log(LOG_INFO, "  maginit             Initialize QMC5883P magnetometer");
+    Logger_Log(LOG_INFO, "  magraw              Read raw magnetometer X/Y/Z");
+    Logger_Log(LOG_INFO, "  magimu              Read compact GUI-friendly magnetometer X/Y/Z");
+    Logger_Log(LOG_INFO, "  maghelp             Show magnetometer commands");
     Logger_Log(LOG_INFO, "");
     Logger_Log(LOG_INFO, "Direct motor command:");
     Logger_Log(LOG_INFO, "  FL <text>        Send raw text only to Front Left motor");
@@ -285,6 +306,24 @@ void CommandHandler_Handle(const TerminalCommand_t *cmd)
             case TCMD_MPUDDBGRAW: /* mpudbgraw (query) */
             case TCMD_MPUGYROTEST: /* mpugyrotest (diagnostic) */
             case TCMD_MPUCONV: /* mpuconv (query) */
+            case TCMD_MPUBIAS: /* mpubias (query) */
+            case TCMD_MPUBIASON: /* mpubiason (config) */
+            case TCMD_MPUBIASOFF: /* mpubiasoff (config) */
+            case TCMD_MPUBIASCLEAR: /* mpubiasclear (config) */
+            case TCMD_IMU_HELP:      /* imu help (query) */
+            case TCMD_IMU_STREAM_ON: /* imu stream on (config) */
+            case TCMD_IMU_STREAM_OFF:/* imu stream off (config) */
+            case TCMD_IMU_TELPER:    /* imu telper (config) */
+            case TCMD_IMU_GYROFILTER_STATUS: /* imu gyrofilter status (query) */
+            case TCMD_IMU_GYROFILTER_ON:     /* imu gyrofilter on (config) */
+            case TCMD_IMU_GYROFILTER_OFF:    /* imu gyrofilter off (config) */
+            case TCMD_IMU_DEADBAND:          /* imu deadband (config) */
+            case TCMD_IMU_LPF:               /* imu lpf (config) */
+            case TCMD_MAGWHO:                /* magwho (query) */
+            case TCMD_MAGINIT:               /* maginit (init) */
+            case TCMD_MAGRAW:                /* magraw (query) */
+            case TCMD_MAGIMU:                /* magimu (query) */
+            case TCMD_MAGHELP:               /* maghelp (query) */
                 allowed = true;
                 break;
 
@@ -496,25 +535,249 @@ void CommandHandler_Handle(const TerminalCommand_t *cmd)
             IMU_MPU9250_Conv_t conv;
             HAL_StatusTypeDef st = IMU_MPU9250_ReadConverted(&hi2c1, &conv);
             uint8_t ok = (st == HAL_OK) ? 1U : 0U;
+
+            int32_t gx = conv.gyro_x_mdps;
+            int32_t gy = conv.gyro_y_mdps;
+            int32_t gz = conv.gyro_z_mdps;
+            IMU_ApplyGyroFilter(&gx, &gy, &gz);
+
             Logger_Log(LOG_INFO,
                        "MPU_CONV_MILLI,"
                        "ACC_X_MG:%ld,ACC_Y_MG:%ld,ACC_Z_MG:%ld,"
                        "TEMP_CX100:%ld,"
                        "GYRO_X_MDPS:%ld,GYRO_Y_MDPS:%ld,GYRO_Z_MDPS:%ld,"
-                       "OK:%u",
+                       "BIAS:%u,BSRC:%u,GFILT:%u,GDB:%ld,GLPF:%ld,OK:%u",
                        (long)conv.acc_x_mg, (long)conv.acc_y_mg, (long)conv.acc_z_mg,
                        (long)conv.temp_cx100,
-                       (long)conv.gyro_x_mdps, (long)conv.gyro_y_mdps, (long)conv.gyro_z_mdps,
+                       (long)gx, (long)gy, (long)gz,
+                       IMU_MPU9250_BiasIsEnabled(), IMU_MPU9250_BiasGetSource(),
+                       IMU_GyroFilterIsEnabled(),
+                       (long)IMU_GyroFilterGetDeadband(), (long)IMU_GyroFilterGetLpfAlpha(),
                        ok);
             Logger_Log(LOG_INFO,
                        "MPU_IMU,"
                        "AX:%ld,AY:%ld,AZ:%ld,"
                        "GX:%ld,GY:%ld,GZ:%ld,"
-                       "TC:%ld,OK:%u",
+                       "TC:%ld,BIAS:%u,BSRC:%u,GFILT:%u,GDB:%ld,GLPF:%ld,OK:%u",
                        (long)conv.acc_x_mg, (long)conv.acc_y_mg, (long)conv.acc_z_mg,
-                       (long)conv.gyro_x_mdps, (long)conv.gyro_y_mdps, (long)conv.gyro_z_mdps,
+                       (long)gx, (long)gy, (long)gz,
                        (long)conv.temp_cx100,
+                       IMU_MPU9250_BiasIsEnabled(), IMU_MPU9250_BiasGetSource(),
+                       IMU_GyroFilterIsEnabled(),
+                       (long)IMU_GyroFilterGetDeadband(), (long)IMU_GyroFilterGetLpfAlpha(),
                        ok);
+            break;
+        }
+
+        case TCMD_MPUBIAS:
+        {
+            IMU_MPU9250_BiasQuery();
+            break;
+        }
+
+        case TCMD_MPUBIASON:
+        {
+            IMU_MPU9250_BiasEnable();
+            break;
+        }
+
+        case TCMD_MPUBIASOFF:
+        {
+            IMU_MPU9250_BiasDisable();
+            break;
+        }
+
+        case TCMD_MPUBIASCLEAR:
+        {
+            IMU_MPU9250_BiasClear();
+            break;
+        }
+
+        case TCMD_IMU_HELP:
+        {
+            Logger_Log(LOG_INFO, "IMU_HELP,COMMANDS:");
+            Logger_Log(LOG_INFO, "  imu help");
+            Logger_Log(LOG_INFO, "  imu stream on");
+            Logger_Log(LOG_INFO, "  imu stream off");
+            Logger_Log(LOG_INFO, "  imu telper <ms>");
+            Logger_Log(LOG_INFO, "  imu gyrofilter status");
+            Logger_Log(LOG_INFO, "  imu gyrofilter on");
+            Logger_Log(LOG_INFO, "  imu gyrofilter off");
+            Logger_Log(LOG_INFO, "  imu deadband <mdps>");
+            Logger_Log(LOG_INFO, "  imu lpf <alpha_permille>");
+            Logger_Log(LOG_INFO, "  mpuwho");
+            Logger_Log(LOG_INFO, "  mpuinit");
+            Logger_Log(LOG_INFO, "  mpuraw");
+            Logger_Log(LOG_INFO, "  mpuconv");
+            Logger_Log(LOG_INFO, "  mpubias");
+            Logger_Log(LOG_INFO, "  mpubiason");
+            Logger_Log(LOG_INFO, "  mpubiasoff");
+            Logger_Log(LOG_INFO, "  mpubiasclear");
+            Logger_Log(LOG_INFO, "  mpucfgtest");
+            Logger_Log(LOG_INFO, "  mpugyrotest");
+            Logger_Log(LOG_INFO, "  magwho");
+            Logger_Log(LOG_INFO, "  maginit");
+            Logger_Log(LOG_INFO, "  magraw");
+            Logger_Log(LOG_INFO, "  maghelp");
+            break;
+        }
+
+        case TCMD_IMU_STREAM_ON:
+        {
+            IMU_StreamOn();
+            break;
+        }
+
+        case TCMD_IMU_STREAM_OFF:
+        {
+            IMU_StreamOff();
+            break;
+        }
+
+        case TCMD_IMU_TELPER:
+        {
+            if (!cmd->hasValue)
+            {
+                Logger_Log(LOG_INFO, "IMU_TELPER,ERR:MISSING_VALUE,OK:0");
+                break;
+            }
+            IMU_StreamSetPeriod(cmd->value);
+            break;
+        }
+
+        case TCMD_IMU_GYROFILTER_STATUS:
+        {
+            IMU_GyroFilterStatus();
+            break;
+        }
+
+        case TCMD_IMU_GYROFILTER_ON:
+        {
+            IMU_GyroFilterOn();
+            break;
+        }
+
+        case TCMD_IMU_GYROFILTER_OFF:
+        {
+            IMU_GyroFilterOff();
+            break;
+        }
+
+        case TCMD_IMU_DEADBAND:
+        {
+            if (!cmd->hasValue)
+            {
+                Logger_Log(LOG_INFO, "IMU_DEADBAND,ERR:MISSING_VALUE,OK:0");
+                break;
+            }
+            IMU_GyroFilterSetDeadband(cmd->value);
+            break;
+        }
+
+        case TCMD_IMU_LPF:
+        {
+            if (!cmd->hasValue)
+            {
+                Logger_Log(LOG_INFO, "IMU_LPF,ERR:MISSING_VALUE,OK:0");
+                break;
+            }
+            IMU_GyroFilterSetLpfAlpha(cmd->value);
+            break;
+        }
+
+        case TCMD_MAGWHO:
+        {
+            extern I2C_HandleTypeDef hi2c1;
+            MAG_QMC5883P_Handle_t mag;
+            HAL_StatusTypeDef st = MAG_QMC5883P_Detect(&hi2c1, &mag);
+            if (st == HAL_OK && mag.found)
+            {
+                Logger_Log(LOG_INFO,
+                           "MAG_WHO,ADDR:0x%02X,DEVADDR_HAL:0x%02X,"
+                           "CHIP:QMC5883P,CHIP_ID:0x%02X,OK:1",
+                           (unsigned)mag.addr7,
+                           (unsigned)(mag.addr7 << 1),
+                           (unsigned)mag.chip_id);
+            }
+            else if (st == HAL_OK && !mag.found)
+            {
+                Logger_Log(LOG_INFO, "MAG_WHO,ADDR:0x%02X,OK:0,ERR:NOT_FOUND",
+                           (unsigned)MAG_QMC5883P_ADDR7);
+            }
+            else
+            {
+                Logger_Log(LOG_INFO, "MAG_WHO,ADDR:0x%02X,OK:0,ERR:NOT_FOUND",
+                           (unsigned)MAG_QMC5883P_ADDR7);
+            }
+            break;
+        }
+
+        case TCMD_MAGINIT:
+        {
+            extern I2C_HandleTypeDef hi2c1;
+            static MAG_QMC5883P_Handle_t mag_handle = {0};
+            HAL_StatusTypeDef st = MAG_QMC5883P_Init(&hi2c1, &mag_handle);
+            if (st == HAL_OK && mag_handle.initialized)
+            {
+                uint8_t r29 = 0, ctrl2 = 0, ctrl1 = 0;
+                MAG_QMC5883P_ReadReg(&hi2c1, MAG_QMC5883P_REG_AXIS_SIGN, &r29);
+                MAG_QMC5883P_ReadReg(&hi2c1, MAG_QMC5883P_REG_CTRL2, &ctrl2);
+                MAG_QMC5883P_ReadReg(&hi2c1, MAG_QMC5883P_REG_CTRL1, &ctrl1);
+                Logger_Log(LOG_INFO,
+                           "MAG_INIT,CHIP:QMC5883P,ADDR:0x%02X,CHIP_ID:0x%02X,"
+                           "REG29:0x%02X,CTRL2:0x%02X,CTRL1:0x%02X,OK:1",
+                           (unsigned)mag_handle.addr7,
+                           (unsigned)mag_handle.chip_id,
+                           (unsigned)r29, (unsigned)ctrl2, (unsigned)ctrl1);
+            }
+            else
+            {
+                const char *err = "UNKNOWN";
+                if (!mag_handle.found) err = "NOT_FOUND";
+                else if (mag_handle.chip_id != MAG_QMC5883P_CHIP_ID_EXPECTED) err = "CHIP_ID";
+                Logger_Log(LOG_INFO, "MAG_INIT,OK:0,ERR:%s", err);
+            }
+            break;
+        }
+
+        case TCMD_MAGRAW:
+        {
+            extern I2C_HandleTypeDef hi2c1;
+            static MAG_QMC5883P_Handle_t mag_handle = {0};
+            MAG_QMC5883P_Raw_t raw;
+            HAL_StatusTypeDef st = MAG_QMC5883P_ReadRaw(&hi2c1, &mag_handle, &raw);
+            if (st == HAL_OK)
+            {
+                uint8_t drdy = (raw.status & MAG_QMC5883P_STATUS_DRDY) ? 1U : 0U;
+                uint8_t ovfl = (raw.status & MAG_QMC5883P_STATUS_OVFL) ? 1U : 0U;
+                Logger_Log(LOG_INFO,
+                           "MAG_RAW,X:%d,Y:%d,Z:%d,"
+                           "STATUS:0x%02X,DRDY:%u,OVFL:%u,CHIP:QMC5883P,OK:1",
+                           (int)raw.x, (int)raw.y, (int)raw.z,
+                           (unsigned)raw.status, drdy, ovfl);
+            }
+            else
+            {
+                Logger_Log(LOG_INFO, "MAG_RAW,OK:0,ERR:READ_FAILED");
+            }
+            break;
+        }
+
+        case TCMD_MAGIMU:
+        {
+            extern I2C_HandleTypeDef hi2c1;
+            static MAG_QMC5883P_Handle_t mag_handle = {0};
+            MAG_QMC5883P_ReadImu(&hi2c1, &mag_handle);
+            break;
+        }
+
+        case TCMD_MAGHELP:
+        {
+            Logger_Log(LOG_INFO, "MAG_HELP,magwho");
+            Logger_Log(LOG_INFO, "MAG_HELP,maginit");
+            Logger_Log(LOG_INFO, "MAG_HELP,magraw");
+            Logger_Log(LOG_INFO, "MAG_HELP,magimu");
+            Logger_Log(LOG_INFO, "MAG_HELP,maghelp");
             break;
         }
 

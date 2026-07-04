@@ -230,6 +230,31 @@ _RE_OP_MODE_CONFIRM = re.compile(
     r"\[MODE\]\s+(DISARM|MANUAL|AUTONOMOUS)\s+active\b"
 )
 
+# -- IMU telemetry pattern ---------------------------------------------------
+#   [INFO] MPU_IMU,AX:<mg>,AY:<mg>,AZ:<mg>,GX:<mdps>,GY:<mdps>,GZ:<mdps>,TC:<cx100>,...
+def _parse_kv_payload(line: str, marker: str) -> dict[str, int] | None:
+    """Generic key:value parser for firmware telemetry lines.
+
+    Returns a dict of {key: int_value} for all ``KEY:VALUE`` pairs found
+    after *marker* in *line*, or ``None`` if *marker* is not present.
+    Unknown keys and non-integer values are silently skipped.
+    """
+    if marker not in line:
+        return None
+    payload = line.split(marker, 1)[1]
+    result: dict[str, int] = {}
+    for item in payload.split(","):
+        if ":" not in item:
+            continue
+        key, value = item.split(":", 1)
+        key = key.strip()
+        value = value.strip()
+        try:
+            result[key] = int(value)
+        except ValueError:
+            continue
+    return result if result else None
+
 
 # ============================================================================
 #  F411 Motor Tuning Settings Dialog
@@ -622,6 +647,379 @@ class MotorSettingsDialog(QDialog):
 
 
 # ============================================================================
+#  IMU / MAG Settings Dialog
+# ============================================================================
+
+class ImuMagSettingsDialog(QDialog):
+    """IMU / MAG Settings dialog.
+
+    Contains all IMU/MAG command buttons organized in grouped sections.
+    Opened from the main GUI's 'IMU Settings' button near the IMU table.
+    """
+
+    def __init__(self, main_gui: "EarendilControlGui", parent=None):
+        super().__init__(parent)
+        self._gui = main_gui
+        self.setWindowTitle("IMU / MAG Settings")
+        self.setMinimumWidth(420)
+        self._apply_theme_style()
+
+        root = QVBoxLayout(self)
+        root.setSpacing(4)
+        root.setContentsMargins(6, 6, 6, 6)
+
+        # Grid layout for grouped sections
+        grid = QGridLayout()
+        grid.setSpacing(4)
+
+        # Row 0: I2C/Detection | Init
+        grid.addWidget(self._build_i2c_detection_group(), 0, 0)
+        grid.addWidget(self._build_init_group(), 0, 1)
+
+        # Row 1: MPU Read | MPU Bias
+        grid.addWidget(self._build_mpu_read_group(), 1, 0)
+        grid.addWidget(self._build_mpu_bias_group(), 1, 1)
+
+        # Row 2: MPU Test | IMU Stream
+        grid.addWidget(self._build_mpu_test_group(), 2, 0)
+        grid.addWidget(self._build_imu_stream_group(), 2, 1)
+
+        # Row 3: Telemetry Period | Gyro Filter
+        grid.addWidget(self._build_telper_group(), 3, 0)
+        grid.addWidget(self._build_gyro_filter_group(), 3, 1)
+
+        # Row 4: Gyro Deadband | Gyro LPF
+        grid.addWidget(self._build_gyro_deadband_group(), 4, 0)
+        grid.addWidget(self._build_gyro_lpf_group(), 4, 1)
+
+        # Row 5: MAG Read | Help
+        grid.addWidget(self._build_mag_read_group(), 5, 0)
+        grid.addWidget(self._build_help_group(), 5, 1)
+
+        root.addLayout(grid)
+
+        # Close button
+        btn_close = QPushButton("Close")
+        btn_close.clicked.connect(self.close)
+        root.addWidget(btn_close)
+
+    # ==================================================================
+    #  Helper: create a small command button
+    # ==================================================================
+
+    def _make_btn(self, label: str, cmd: str) -> QPushButton:
+        """Create a compact button that sends a command when clicked."""
+        btn = QPushButton(label)
+        btn.setFixedHeight(24)
+        btn.setStyleSheet("""
+            QPushButton {
+                padding: 2px 6px;
+                font-size: 11px;
+            }
+        """)
+        btn.clicked.connect(lambda checked=False, c=cmd: self._gui._send_cmd(c))
+        return btn
+
+    def _make_hbox(self, *widgets) -> QHBoxLayout:
+        """Create a horizontal layout with tight spacing."""
+        lay = QHBoxLayout()
+        lay.setSpacing(3)
+        lay.setContentsMargins(0, 0, 0, 0)
+        for w in widgets:
+            lay.addWidget(w)
+        return lay
+
+    # ==================================================================
+    #  UI builders
+    # ==================================================================
+
+    def _build_i2c_detection_group(self) -> QGroupBox:
+        grp = QGroupBox("I2C / Detection")
+        lay = QVBoxLayout(grp)
+        lay.setSpacing(2)
+        lay.setContentsMargins(6, 10, 6, 4)
+        lay.addLayout(self._make_hbox(
+            self._make_btn("Scan", "i2cscan"),
+            self._make_btn("MPU WHO", "mpuwho"),
+            self._make_btn("MAG WHO", "magwho"),
+        ))
+        return grp
+
+    def _build_init_group(self) -> QGroupBox:
+        grp = QGroupBox("Init")
+        lay = QVBoxLayout(grp)
+        lay.setSpacing(2)
+        lay.setContentsMargins(6, 10, 6, 4)
+        btn_all = QPushButton("Init All")
+        btn_all.setFixedHeight(24)
+        btn_all.setStyleSheet("QPushButton { padding: 2px 6px; font-size: 11px; }")
+        btn_all.clicked.connect(self._init_all)
+        lay.addLayout(self._make_hbox(
+            self._make_btn("MPU", "mpuinit"),
+            self._make_btn("MAG", "maginit"),
+            btn_all,
+        ))
+        return grp
+
+    def _build_mpu_read_group(self) -> QGroupBox:
+        grp = QGroupBox("MPU Read")
+        lay = QVBoxLayout(grp)
+        lay.setSpacing(2)
+        lay.setContentsMargins(6, 10, 6, 4)
+        lay.addLayout(self._make_hbox(
+            self._make_btn("Raw", "mpuraw"),
+            self._make_btn("Conv", "mpuconv"),
+        ))
+        return grp
+
+    def _build_mpu_bias_group(self) -> QGroupBox:
+        grp = QGroupBox("MPU Bias")
+        lay = QVBoxLayout(grp)
+        lay.setSpacing(2)
+        lay.setContentsMargins(6, 10, 6, 4)
+        lay.addLayout(self._make_hbox(
+            self._make_btn("Status", "mpubias"),
+            self._make_btn("ON", "mpubiason"),
+            self._make_btn("OFF", "mpubiasoff"),
+            self._make_btn("Clear", "mpubiasclear"),
+        ))
+        return grp
+
+    def _build_mpu_test_group(self) -> QGroupBox:
+        grp = QGroupBox("MPU Test")
+        lay = QVBoxLayout(grp)
+        lay.setSpacing(2)
+        lay.setContentsMargins(6, 10, 6, 4)
+        lay.addLayout(self._make_hbox(
+            self._make_btn("Config", "mpucfgtest"),
+            self._make_btn("Gyro", "mpugyrotest"),
+        ))
+        return grp
+
+    def _build_imu_stream_group(self) -> QGroupBox:
+        grp = QGroupBox("IMU Stream")
+        lay = QVBoxLayout(grp)
+        lay.setSpacing(2)
+        lay.setContentsMargins(6, 10, 6, 4)
+        lay.addLayout(self._make_hbox(
+            self._make_btn("ON", "imu stream on"),
+            self._make_btn("OFF", "imu stream off"),
+        ))
+        self._lbl_stream_status = QLabel("Status: --")
+        self._lbl_stream_status.setStyleSheet("color: #8E8E93; font-size: 10px;")
+        lay.addWidget(self._lbl_stream_status)
+        return grp
+
+    def _build_telper_group(self) -> QGroupBox:
+        grp = QGroupBox("Tel Period")
+        lay = QVBoxLayout(grp)
+        lay.setSpacing(2)
+        lay.setContentsMargins(6, 10, 6, 4)
+        row = QHBoxLayout()
+        row.setSpacing(3)
+        row.setContentsMargins(0, 0, 0, 0)
+        self._spin_telper = QSpinBox()
+        self._spin_telper.setRange(20, 5000)
+        self._spin_telper.setValue(100)
+        self._spin_telper.setFixedHeight(24)
+        self._spin_telper.setFixedWidth(70)
+        row.addWidget(self._spin_telper)
+        row.addWidget(QLabel("ms"))
+        btn = QPushButton("Set")
+        btn.setFixedHeight(24)
+        btn.setFixedWidth(40)
+        btn.setStyleSheet("QPushButton { padding: 2px 6px; font-size: 11px; }")
+        btn.clicked.connect(self._set_telper)
+        row.addWidget(btn)
+        row.addStretch()
+        lay.addLayout(row)
+        return grp
+
+    def _build_gyro_filter_group(self) -> QGroupBox:
+        grp = QGroupBox("Gyro Filter")
+        lay = QVBoxLayout(grp)
+        lay.setSpacing(2)
+        lay.setContentsMargins(6, 10, 6, 4)
+        lay.addLayout(self._make_hbox(
+            self._make_btn("Status", "imu gyrofilter status"),
+            self._make_btn("ON", "imu gyrofilter on"),
+            self._make_btn("OFF", "imu gyrofilter off"),
+        ))
+        self._lbl_gyro_filter_status = QLabel("Status: --")
+        self._lbl_gyro_filter_status.setStyleSheet("color: #8E8E93; font-size: 10px;")
+        lay.addWidget(self._lbl_gyro_filter_status)
+        return grp
+
+    def _build_gyro_deadband_group(self) -> QGroupBox:
+        grp = QGroupBox("Deadband")
+        lay = QVBoxLayout(grp)
+        lay.setSpacing(2)
+        lay.setContentsMargins(6, 10, 6, 4)
+        row = QHBoxLayout()
+        row.setSpacing(3)
+        row.setContentsMargins(0, 0, 0, 0)
+        self._spin_deadband = QSpinBox()
+        self._spin_deadband.setRange(0, 2000)
+        self._spin_deadband.setValue(250)
+        self._spin_deadband.setFixedHeight(24)
+        self._spin_deadband.setFixedWidth(70)
+        row.addWidget(self._spin_deadband)
+        row.addWidget(QLabel("mdps"))
+        btn = QPushButton("Set")
+        btn.setFixedHeight(24)
+        btn.setFixedWidth(40)
+        btn.setStyleSheet("QPushButton { padding: 2px 6px; font-size: 11px; }")
+        btn.clicked.connect(self._set_deadband)
+        row.addWidget(btn)
+        row.addStretch()
+        lay.addLayout(row)
+        return grp
+
+    def _build_gyro_lpf_group(self) -> QGroupBox:
+        grp = QGroupBox("LPF")
+        lay = QVBoxLayout(grp)
+        lay.setSpacing(2)
+        lay.setContentsMargins(6, 10, 6, 4)
+        row = QHBoxLayout()
+        row.setSpacing(3)
+        row.setContentsMargins(0, 0, 0, 0)
+        self._spin_lpf = QSpinBox()
+        self._spin_lpf.setRange(1, 1000)
+        self._spin_lpf.setValue(250)
+        self._spin_lpf.setFixedHeight(24)
+        self._spin_lpf.setFixedWidth(70)
+        row.addWidget(self._spin_lpf)
+        row.addWidget(QLabel("‰"))
+        btn = QPushButton("Set")
+        btn.setFixedHeight(24)
+        btn.setFixedWidth(40)
+        btn.setStyleSheet("QPushButton { padding: 2px 6px; font-size: 11px; }")
+        btn.clicked.connect(self._set_lpf)
+        row.addWidget(btn)
+        row.addStretch()
+        lay.addLayout(row)
+        return grp
+
+    def _build_mag_read_group(self) -> QGroupBox:
+        grp = QGroupBox("MAG Read")
+        lay = QVBoxLayout(grp)
+        lay.setSpacing(2)
+        lay.setContentsMargins(6, 10, 6, 4)
+        lay.addLayout(self._make_hbox(
+            self._make_btn("Raw", "magraw"),
+            self._make_btn("µT", "magimu"),
+        ))
+        return grp
+
+    def _build_help_group(self) -> QGroupBox:
+        grp = QGroupBox("Help")
+        lay = QVBoxLayout(grp)
+        lay.setSpacing(2)
+        lay.setContentsMargins(6, 10, 6, 4)
+        lay.addLayout(self._make_hbox(
+            self._make_btn("IMU", "imu help"),
+            self._make_btn("MAG", "maghelp"),
+        ))
+        return grp
+
+    # ==================================================================
+    #  Actions
+    # ==================================================================
+
+    def _init_all(self):
+        """Send mpuinit then maginit sequentially."""
+        self._gui._send_cmd("mpuinit")
+        # Use QTimer to send second command after a short delay (non-blocking)
+        QTimer.singleShot(200, lambda: self._gui._send_cmd("maginit"))
+
+    def _set_telper(self):
+        val = self._spin_telper.value()
+        self._gui._send_cmd(f"imu telper {val}")
+
+    def _set_deadband(self):
+        val = self._spin_deadband.value()
+        self._gui._send_cmd(f"imu deadband {val}")
+
+    def _set_lpf(self):
+        val = self._spin_lpf.value()
+        self._gui._send_cmd(f"imu lpf {val}")
+
+    # ==================================================================
+    #  Theme
+    # ==================================================================
+
+    def _apply_theme_style(self):
+        """Apply dark theme styling to the dialog."""
+        self.setStyleSheet("""
+            QDialog {
+                background-color: #1e1e2e;
+                color: #cdd6f4;
+            }
+            QGroupBox {
+                background-color: #313244;
+                border: 1px solid #45475a;
+                border-radius: 4px;
+                margin-top: 8px;
+                padding-top: 10px;
+                color: #cdd6f4;
+                font-weight: bold;
+                font-size: 11px;
+            }
+            QGroupBox::title {
+                subcontrol-origin: margin;
+                left: 8px;
+                padding: 0 4px;
+                color: #89b4fa;
+            }
+            QPushButton {
+                background-color: #45475a;
+                border: 1px solid #585b70;
+                border-radius: 3px;
+                padding: 2px 6px;
+                color: #cdd6f4;
+                font-size: 11px;
+            }
+            QPushButton:hover {
+                background-color: #585b70;
+            }
+            QPushButton:pressed {
+                background-color: #6c7086;
+            }
+            QSpinBox {
+                background-color: #45475a;
+                border: 1px solid #585b70;
+                border-radius: 3px;
+                padding: 2px;
+                color: #cdd6f4;
+                font-size: 11px;
+            }
+            QLabel {
+                color: #cdd6f4;
+                font-size: 11px;
+            }
+        """)
+
+    # ==================================================================
+    #  Status updates (called from main GUI when telemetry is parsed)
+    # ==================================================================
+
+    def update_stream_status(self, status: str):
+        """Update the stream status label."""
+        if hasattr(self, '_lbl_stream_status'):
+            self._lbl_stream_status.setText(f"Stream: {status}")
+
+    def update_gyro_filter_status(self, status: str):
+        """Update the gyro filter status label."""
+        if hasattr(self, '_lbl_gyro_filter_status'):
+            self._lbl_gyro_filter_status.setText(f"Gyro Filter: {status}")
+
+    def closeEvent(self, event):
+        """Clean up when dialog is closed."""
+        # Just accept the close, don't disconnect serial
+        event.accept()
+
+
+# ============================================================================
 #  Main GUI
 # ============================================================================
 
@@ -730,7 +1128,9 @@ class EarendilControlGui(QMainWindow):
             border: 1px solid {c['border']};
             border-radius: 6px;
             margin-top: 10px;
+            margin-bottom: 0px;
             padding-top: 14px;
+            padding-bottom: 0px;
             font-weight: bold;
             color: {c['text']};
         }}
@@ -855,10 +1255,10 @@ class EarendilControlGui(QMainWindow):
         "link": 15,
     }
     MOTOR_COL_HEADERS = [
-        "Motor", "Current RPM", "Target RPM", "Drive Duty",
-        "Direction", "Motor State", "Control Mode", "Brake Status",
-        "Fault Code", "Hall Sensor", "Target PWM", "Applied PWM",
-        "Dropped Commands", "Received UART Bytes", "Error", "Link",
+        "Motor", "RPM", "Target RPM", "Duty",
+        "Dir", "State", "Control Mode", "Brake",
+        "Fault", "Hall", "Target PWM", "Applied PWM",
+        "Dropped Commands", "RXB", "Error", "Link",
     ]
 
     # UART RX suffix -> motor tag (for legacy [USART2_RX] format)
@@ -961,6 +1361,9 @@ class EarendilControlGui(QMainWindow):
         self._tuning_send_timer.setInterval(self.TUNING_SEND_INTERVAL_MS)
         self._tuning_send_timer.timeout.connect(
             self._send_next_f411_tuning_command)
+
+        # -- IMU/MAG settings dialog reference ---------------------------
+        self._imu_settings_dialog: ImuMagSettingsDialog | None = None
 
         # -- Build UI -------------------------------------------------------
         self._central = LogoBackgroundWidget("earendil_logo.png", opacity=1.0)
@@ -1225,16 +1628,22 @@ class EarendilControlGui(QMainWindow):
 
     def _build_motor_table_group(self) -> QGroupBox:
         grp = QGroupBox("Motor State")
+        grp.setStyleSheet("""
+            QGroupBox {
+                padding-bottom: 0px;
+                margin-bottom: 0px;
+            }
+        """)
         lay = QVBoxLayout(grp)
+        lay.setContentsMargins(6, 4, 6, 0)
+        lay.setSpacing(0)
 
         num_cols = len(self.MOTOR_COL_HEADERS)
         self._motor_table = QTableWidget(4, num_cols)
         self._motor_table.setHorizontalHeaderLabels(self.MOTOR_COL_HEADERS)
         headers = self._motor_table.horizontalHeader()
         if headers:
-            headers.setSectionResizeMode(QHeaderView.ResizeToContents)
-            headers.setSectionResizeMode(self.MOTOR_COL["motor"], QHeaderView.Stretch)
-            headers.setSectionResizeMode(self.MOTOR_COL["error"], QHeaderView.Stretch)
+            headers.setSectionResizeMode(QHeaderView.Stretch)
 
         motors = ["FL", "FR", "RL", "RR"]
         for row, name in enumerate(motors):
@@ -1243,19 +1652,24 @@ class EarendilControlGui(QMainWindow):
                 self._motor_table.setItem(row, col, QTableWidgetItem("--"))
 
         self._motor_table.setVerticalHeaderLabels([])
+        self._motor_table.verticalHeader().setVisible(False)
         self._motor_table.setEditTriggers(QTableWidget.NoEditTriggers)
         self._motor_table.setFocusPolicy(Qt.NoFocus)
-        self._motor_table.setMaximumHeight(200)
-        self._motor_table.setMinimumHeight(160)
+        self._motor_table.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self._motor_table.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self._motor_table.setMaximumHeight(150)
+        self._motor_table.setMinimumHeight(150)
         lay.addWidget(self._motor_table)
 
         # -- Settings button (opens F411 Motor Tuning Settings dialog) -----
         # Right-aligned so it reads as "table -> settings" within the group.
         btn_row = QHBoxLayout()
         btn_row.setContentsMargins(0, 0, 0, 0)
+        btn_row.setSpacing(0)
         btn_row.addStretch()
 
         self._btn_motor_settings = QPushButton("Settings")
+        self._btn_motor_settings.setStyleSheet("QPushButton { padding: 0px; margin: 0px; }")
         self._btn_motor_settings.clicked.connect(self._open_motor_settings)
         btn_row.addWidget(self._btn_motor_settings)
         lay.addLayout(btn_row)
@@ -1264,54 +1678,97 @@ class EarendilControlGui(QMainWindow):
     # -- 9-axis IMU placeholder --------------------------------------------
     #   3 accel (X/Y/Z) + 3 gyro (X/Y/Z) + 3 mag (X/Y/Z).
     #   Values shown as "--" until firmware sends real IMU data; the parser
-    #   hook (_update_imu_values) is wired but a no-op until then.
+    #   hook (_parse_imu_line) is wired and updates the converted table.
     IMU_FIELDS = ("AX", "AY", "AZ", "GX", "GY", "GZ", "MX", "MY", "MZ")
 
-    def _build_imu_group(self) -> QGroupBox:
-        grp = QGroupBox("IMU (9-axis)")
-        grp.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
-        lay = QVBoxLayout(grp)
-        lay.setContentsMargins(8, 6, 8, 6)
-        lay.setSpacing(6)
+    # Row indices for the IMU table
+    _IMU_ROW = {"Accel": 0, "Gyro": 1, "Mag": 2, "Temp": 3}
 
-        self._imu_table = QTableWidget(3, 4)
-        self._imu_table.setHorizontalHeaderLabels(
-            ["Sensor", "X", "Y", "Z"]
-        )
+    def _build_imu_group(self) -> QGroupBox:
+        grp = QGroupBox("IMU")
+        grp.setSizePolicy(QSizePolicy.Maximum, QSizePolicy.Fixed)
+        grp.setStyleSheet("""
+            QGroupBox {
+                padding-bottom: 0px;
+                margin-bottom: 0px;
+            }
+        """)
+        lay = QVBoxLayout(grp)
+        lay.setContentsMargins(6, 4, 6, 0)
+        lay.setSpacing(0)
+
+        self._imu_table = QTableWidget(4, 4)
+        self._imu_table.setHorizontalHeaderLabels(["Sensor", "X", "Y", "Z"])
         headers = self._imu_table.horizontalHeader()
         if headers:
-            headers.setSectionResizeMode(QHeaderView.Stretch)
-        self._imu_table.setVerticalHeaderLabels([])
+            headers.setSectionResizeMode(0, QHeaderView.Fixed)
+            headers.setSectionResizeMode(1, QHeaderView.Fixed)
+            headers.setSectionResizeMode(2, QHeaderView.Fixed)
+            headers.setSectionResizeMode(3, QHeaderView.Fixed)
+            headers.resizeSection(0, 65)
+            headers.resizeSection(1, 65)
+            headers.resizeSection(2, 65)
+            headers.resizeSection(3, 65)
+            headers.setFixedHeight(20)
+            headers.setSectionsMovable(False)
+            headers.setSortIndicatorShown(False)
+        self._imu_table.verticalHeader().setVisible(False)
+        self._imu_table.verticalHeader().setDefaultSectionSize(22)
+        self._imu_table.verticalHeader().setMinimumWidth(0)
+        self._imu_table.verticalHeader().setMaximumWidth(0)
+        self._imu_table.setMinimumWidth(0)
+        self._imu_table.setMaximumWidth(260)
+        self._imu_table.setMaximumHeight(108)
+        self._imu_table.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
 
-        sensors = [("Accel", "m/s2"), ("Gyro", "deg/s"), ("Mag", "uT")]
-        for row, (name, _unit) in enumerate(sensors):
+        labels = ["Accel", "Gyro", "Mag", "Temp"]
+        for row, name in enumerate(labels):
             self._imu_table.setItem(row, 0, QTableWidgetItem(name))
             for col in range(1, 4):
                 self._imu_table.setItem(row, col, QTableWidgetItem("--"))
 
         self._imu_table.setEditTriggers(QTableWidget.NoEditTriggers)
         self._imu_table.setFocusPolicy(Qt.NoFocus)
-        self._imu_table.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         self._imu_table.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
-        self._imu_table.setMaximumHeight(120)
+        self._imu_table.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self._imu_table.verticalHeader().hide()
+        self._imu_table.horizontalHeader().setStretchLastSection(False)
+        self._imu_table.setStyleSheet("""
+            QTableWidget {
+                padding: 0px;
+                margin: 0px;
+                border: 1px solid palette(mid);
+                font-size: 12px;
+            }
+            QTableWidget::item {
+                padding: 3px 5px;
+            }
+            QHeaderView::section {
+                padding: 3px 5px;
+                font-size: 11px;
+            }
+        """)
         lay.addWidget(self._imu_table)
+
+        # IMU Settings button
+        btn_imu_settings = QPushButton("Settings")
+        btn_imu_settings.setFixedHeight(22)
+        btn_imu_settings.setFixedWidth(90)
+        btn_imu_settings.setStyleSheet("QPushButton { padding: 0px; margin: 0px; }")
+        btn_imu_settings.clicked.connect(self._open_imu_settings)
+        btn_row = QHBoxLayout()
+        btn_row.setContentsMargins(0, 0, 0, 0)
+        btn_row.setSpacing(0)
+        btn_row.addWidget(btn_imu_settings)
+        btn_row.addStretch()
+        lay.addLayout(btn_row)
+
         return grp
 
-    def _update_imu_values(self, values: dict[str, float]):
-        """Update the IMU table from a 9-axis reading.
-
-        `values` keys: AX, AY, AZ, GX, GY, GZ, MX, MY, MZ.
-        Kept as a hook for future firmware IMU parsing; currently unused.
-        """
-        rows = {"A": 0, "G": 1, "M": 2}
-        for field in self.IMU_FIELDS:
-            if field not in values:
-                continue
-            row = rows[field[0]]
-            col = {"X": 1, "Y": 2, "Z": 3}[field[1]]
-            item = self._imu_table.item(row, col)
-            if item is not None:
-                item.setText(f"{values[field]:.2f}")
+    def _set_imu_cell(self, row: int, col: int, text: str):
+        item = self._imu_table.item(row, col)
+        if item is not None:
+            item.setText(text)
 
     def _update_motion_indicator(self, direction: str | None):
         """Update the Motion badge in Rover Status.  direction is one of W/S/A/D or None for IDLE."""
@@ -1795,6 +2252,7 @@ class EarendilControlGui(QMainWindow):
             self._parse_rx_for_motor_state(line)
         self._parse_uart_error_line(line)
         self._parse_operating_mode_confirm(line)
+        self._parse_imu_line(line)
 
     def _parse_rx_for_motor_state(self, line: str):
         """Update Link column if link-lost/recovered detected."""
@@ -2099,6 +2557,91 @@ class EarendilControlGui(QMainWindow):
             f"not confirmed by H7 - keeping current mode "
             f"({self.OPERATING_MODES.get(self._operating_mode, {}).get('label', self._operating_mode)})."
         )
+
+    # -- IMU telemetry parsing -----------------------------------------------
+
+    def _parse_imu_line(self, line: str) -> bool:
+        """Detect and parse MPU_IMU / MPU_CONV_MILLI / MAG_IMU telemetry into the IMU table.
+
+        Supports compact (MPU_IMU), detailed (MPU_CONV_MILLI), and magnetometer (MAG_IMU) formats.
+        Unknown extra fields are ignored.  Missing fields keep last value.
+        Returns True when the line contained recognized IMU telemetry.
+        """
+        # Try MPU_IMU first
+        fields = _parse_kv_payload(line, "MPU_IMU,")
+        is_mpu = True
+        if fields is None:
+            fields = _parse_kv_payload(line, "MPU_CONV_MILLI,")
+            is_mpu = True
+            if fields is not None:
+                mapped: dict[str, int] = {}
+                key_map = {
+                    "ACC_X_MG": "AX", "ACC_Y_MG": "AY", "ACC_Z_MG": "AZ",
+                    "GYRO_X_MDPS": "GX", "GYRO_Y_MDPS": "GY", "GYRO_Z_MDPS": "GZ",
+                    "TEMP_CX100": "TC",
+                }
+                for src, dst in key_map.items():
+                    if src in fields:
+                        mapped[dst] = fields[src]
+                for k in ("OK", "BIAS", "BSRC", "GFILT", "GDB", "GLPF"):
+                    if k in fields:
+                        mapped[k] = fields[k]
+                fields = mapped if mapped else None
+
+        # Try MAG_IMU
+        mag_fields = _parse_kv_payload(line, "MAG_IMU,")
+        if mag_fields is not None:
+            R = self._IMU_ROW
+
+            # Magnetometer: prefer physical units (UTX100) over raw
+            if "MX_UTX100" in mag_fields:
+                self._set_imu_cell(R["Mag"], 1, f"{mag_fields['MX_UTX100'] / 100.0:.2f} µT")
+            elif "MX" in mag_fields:
+                # Fallback: convert raw to µT (3750 LSB/Gauss, 1 Gauss = 100 µT)
+                self._set_imu_cell(R["Mag"], 1, f"{mag_fields['MX'] * 100.0 / 3750.0:.2f} µT")
+
+            if "MY_UTX100" in mag_fields:
+                self._set_imu_cell(R["Mag"], 2, f"{mag_fields['MY_UTX100'] / 100.0:.2f} µT")
+            elif "MY" in mag_fields:
+                self._set_imu_cell(R["Mag"], 2, f"{mag_fields['MY'] * 100.0 / 3750.0:.2f} µT")
+
+            if "MZ_UTX100" in mag_fields:
+                self._set_imu_cell(R["Mag"], 3, f"{mag_fields['MZ_UTX100'] / 100.0:.2f} µT")
+            elif "MZ" in mag_fields:
+                self._set_imu_cell(R["Mag"], 3, f"{mag_fields['MZ'] * 100.0 / 3750.0:.2f} µT")
+
+            # Magnetic vector magnitude
+            if "BMAG_UTX100" in mag_fields:
+                self._set_imu_cell(R["Mag"], 0, f"Mag ({mag_fields['BMAG_UTX100'] / 100.0:.2f} µT)")
+
+            return True
+
+        if fields is None:
+            return False
+
+        R = self._IMU_ROW
+
+        # Accel: milli-g -> g, 4 decimal places
+        if "AX" in fields:
+            self._set_imu_cell(R["Accel"], 1, f"{fields['AX'] / 1000.0:.4f} g")
+        if "AY" in fields:
+            self._set_imu_cell(R["Accel"], 2, f"{fields['AY'] / 1000.0:.4f} g")
+        if "AZ" in fields:
+            self._set_imu_cell(R["Accel"], 3, f"{fields['AZ'] / 1000.0:.4f} g")
+
+        # Gyro: milli-dps -> dps, 1 decimal place
+        if "GX" in fields:
+            self._set_imu_cell(R["Gyro"], 1, f"{fields['GX'] / 1000.0:.1f} dps")
+        if "GY" in fields:
+            self._set_imu_cell(R["Gyro"], 2, f"{fields['GY'] / 1000.0:.1f} dps")
+        if "GZ" in fields:
+            self._set_imu_cell(R["Gyro"], 3, f"{fields['GZ'] / 1000.0:.1f} dps")
+
+        # Temperature: centi-Celsius -> Celsius, 1 decimal place, in X column
+        if "TC" in fields:
+            self._set_imu_cell(R["Temp"], 1, f"{fields['TC'] / 100.0:.1f} °C")
+
+        return True
 
     # ======================================================================
     #  Serial Send
@@ -2672,6 +3215,23 @@ class EarendilControlGui(QMainWindow):
         """Open the F411 Motor Tuning Settings dialog (Modal)."""
         dlg = MotorSettingsDialog(self, self)
         dlg.exec()
+
+    def _open_imu_settings(self):
+        """Open the IMU / MAG Settings dialog.
+
+        Prevents duplicate windows by reusing an existing dialog instance.
+        If the dialog is already open, it is brought to focus instead of
+        creating a new one.
+        """
+        if self._imu_settings_dialog is not None and self._imu_settings_dialog.isVisible():
+            # Dialog is already open, bring it to focus
+            self._imu_settings_dialog.raise_()
+            self._imu_settings_dialog.activateWindow()
+            return
+
+        # Create a new dialog instance
+        self._imu_settings_dialog = ImuMagSettingsDialog(self, self)
+        self._imu_settings_dialog.show()
 
     # -- F411 tuning paced-send (QTimer-based, no blocking) --------------
 

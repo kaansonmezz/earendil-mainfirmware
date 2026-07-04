@@ -61,7 +61,25 @@ typedef enum
     TCMD_MPURAW,        /* mpuraw : one-shot raw accel/gyro/temperature read */
     TCMD_MPUDDBGRAW,    /* mpudbgraw : update IMU debug variables for CubeIDE */
     TCMD_MPUGYROTEST,   /* mpugyrotest : gyro-specific diagnostic */
-    TCMD_MPUCONV        /* mpuconv : converted accel/gyro/temp in physical units */
+    TCMD_MPUCONV,       /* mpuconv : converted accel/gyro/temp in physical units */
+    TCMD_MPUBIAS,       /* mpubias : query gyro bias state */
+    TCMD_MPUBIASON,     /* mpubiason : enable gyro bias correction */
+    TCMD_MPUBIASOFF,    /* mpubiasoff : disable gyro bias correction */
+    TCMD_MPUBIASCLEAR,  /* mpubiasclear : clear gyro bias to zero */
+    TCMD_IMU_HELP,      /* imu help : show IMU command list */
+    TCMD_IMU_STREAM_ON, /* imu stream on : enable periodic IMU telemetry */
+    TCMD_IMU_STREAM_OFF,/* imu stream off : disable periodic IMU telemetry */
+    TCMD_IMU_TELPER,    /* imu telper <ms> : set IMU telemetry period */
+    TCMD_IMU_GYROFILTER_STATUS, /* imu gyrofilter status */
+    TCMD_IMU_GYROFILTER_ON,     /* imu gyrofilter on */
+    TCMD_IMU_GYROFILTER_OFF,    /* imu gyrofilter off */
+    TCMD_IMU_DEADBAND,          /* imu deadband <mdps> */
+    TCMD_IMU_LPF,               /* imu lpf <alpha_permille> */
+    TCMD_MAGWHO,                /* magwho : detect QMC5883P magnetometer */
+    TCMD_MAGINIT,               /* maginit : init QMC5883P magnetometer */
+    TCMD_MAGRAW,                /* magraw : read raw magnetometer X/Y/Z */
+    TCMD_MAGIMU,                /* magimu : read compact GUI-friendly magnetometer X/Y/Z */
+    TCMD_MAGHELP                /* maghelp : show magnetometer commands */
 } TerminalCommandType_t;
 
 /* ── Parse result ────────────────────────────────────────────────────────── */

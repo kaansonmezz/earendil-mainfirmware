@@ -1,5 +1,5 @@
-Core/Src/imu_mpu9250.o: ../Core/Src/imu_mpu9250.c \
- ../Core/Inc/imu_mpu9250.h \
+Core/Src/mag_qmc5883p.o: ../Core/Src/mag_qmc5883p.c \
+ ../Core/Inc/mag_qmc5883p.h \
  ../Drivers/STM32H7xx_HAL_Driver/Inc/stm32h7xx_hal.h \
  ../Core/Inc/stm32h7xx_hal_conf.h \
  ../Drivers/STM32H7xx_HAL_Driver/Inc/stm32h7xx_hal_rcc.h \
@@ -31,9 +31,8 @@ Core/Src/imu_mpu9250.o: ../Core/Src/imu_mpu9250.c \
  ../Drivers/STM32H7xx_HAL_Driver/Inc/stm32h7xx_hal_pwr_ex.h \
  ../Drivers/STM32H7xx_HAL_Driver/Inc/stm32h7xx_hal_uart.h \
  ../Drivers/STM32H7xx_HAL_Driver/Inc/stm32h7xx_hal_uart_ex.h \
- ../Core/Inc/i2c_scanner.h ../Core/Inc/mag_qmc5883p.h \
  ../Core/Inc/logger.h ../Core/Inc/rover_types.h
-../Core/Inc/imu_mpu9250.h:
+../Core/Inc/mag_qmc5883p.h:
 ../Drivers/STM32H7xx_HAL_Driver/Inc/stm32h7xx_hal.h:
 ../Core/Inc/stm32h7xx_hal_conf.h:
 ../Drivers/STM32H7xx_HAL_Driver/Inc/stm32h7xx_hal_rcc.h:
@@ -65,7 +64,5 @@ Core/Src/imu_mpu9250.o: ../Core/Src/imu_mpu9250.c \
 ../Drivers/STM32H7xx_HAL_Driver/Inc/stm32h7xx_hal_pwr_ex.h:
 ../Drivers/STM32H7xx_HAL_Driver/Inc/stm32h7xx_hal_uart.h:
 ../Drivers/STM32H7xx_HAL_Driver/Inc/stm32h7xx_hal_uart_ex.h:
-../Core/Inc/i2c_scanner.h:
-../Core/Inc/mag_qmc5883p.h:
 ../Core/Inc/logger.h:
 ../Core/Inc/rover_types.h:

@@ -1,0 +1,10 @@
+../Core/Src/mag_qmc5883p.c:13:17:isqrt	24	static
+../Core/Src/mag_qmc5883p.c:27:16:MAG_QMC5883P_RawToUtX100	16	static
+../Core/Src/mag_qmc5883p.c:34:26:Mag_ReadReg	48	static
+../Core/Src/mag_qmc5883p.c:42:26:Mag_ReadBytes	48	static
+../Core/Src/mag_qmc5883p.c:50:26:Mag_WriteReg	40	static
+../Core/Src/mag_qmc5883p.c:60:19:MAG_QMC5883P_ReadReg	24	static
+../Core/Src/mag_qmc5883p.c:67:19:MAG_QMC5883P_Detect	24	static
+../Core/Src/mag_qmc5883p.c:97:19:MAG_QMC5883P_Init	24	static
+../Core/Src/mag_qmc5883p.c:137:19:MAG_QMC5883P_ReadRaw	40	static
+../Core/Src/mag_qmc5883p.c:175:19:MAG_QMC5883P_ReadImu	176	static
