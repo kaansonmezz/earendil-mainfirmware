@@ -33,8 +33,8 @@ Core/Src/safety_manager.o: ../Core/Src/safety_manager.c \
  ../Drivers/STM32H7xx_HAL_Driver/Inc/stm32h7xx_hal_uart.h \
  ../Drivers/STM32H7xx_HAL_Driver/Inc/stm32h7xx_hal_uart_ex.h \
  ../Core/Inc/logger.h ../Core/Inc/motion_controller.h \
- ../Core/Inc/motor_dispatcher.h ../Core/Inc/motor_link.h \
- ../Core/Inc/app_config.h ../Core/Inc/terminal_parser.h \
+ ../Core/Inc/terminal_parser.h ../Core/Inc/motor_dispatcher.h \
+ ../Core/Inc/motor_link.h ../Core/Inc/app_config.h \
  ../Core/Inc/motor_tx_dma.h ../Core/Inc/main.h
 ../Core/Inc/safety_manager.h:
 ../Core/Inc/rover_types.h:
@@ -72,9 +72,9 @@ Core/Src/safety_manager.o: ../Core/Src/safety_manager.c \
 ../Drivers/STM32H7xx_HAL_Driver/Inc/stm32h7xx_hal_uart_ex.h:
 ../Core/Inc/logger.h:
 ../Core/Inc/motion_controller.h:
+../Core/Inc/terminal_parser.h:
 ../Core/Inc/motor_dispatcher.h:
 ../Core/Inc/motor_link.h:
 ../Core/Inc/app_config.h:
-../Core/Inc/terminal_parser.h:
 ../Core/Inc/motor_tx_dma.h:
 ../Core/Inc/main.h:

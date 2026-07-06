@@ -2,9 +2,9 @@
 ../Core/Src/command_handler.c:43:13:IsSafeRawPayload	8
 ../Core/Src/command_handler.c:55:20:MotorTagName	5
 ../Core/Src/command_handler.c:70:6:Command_IsModeTransition	3
-../Core/Src/command_handler.c:75:6:Command_IsMotionCommand	3
-../Core/Src/command_handler.c:84:13:HandleOperatingMode	4
-../Core/Src/command_handler.c:130:13:WaitForTxDrain	3
-../Core/Src/command_handler.c:141:13:HandleControlModeSwitch	5
-../Core/Src/command_handler.c:192:6:CommandHandler_PrintHelp	1
-../Core/Src/command_handler.c:281:6:CommandHandler_Handle	79
+../Core/Src/command_handler.c:75:6:Command_IsMotionCommand	4
+../Core/Src/command_handler.c:85:13:HandleOperatingMode	4
+../Core/Src/command_handler.c:131:13:WaitForTxDrain	3
+../Core/Src/command_handler.c:142:13:HandleControlModeSwitch	5
+../Core/Src/command_handler.c:193:6:CommandHandler_PrintHelp	1
+../Core/Src/command_handler.c:291:6:CommandHandler_Handle	77

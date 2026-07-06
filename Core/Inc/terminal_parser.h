@@ -35,6 +35,16 @@ typedef enum
     TUNE_KIND_TELPER      /* telper MS                      -> "telper MS"             */
 } TuneCmdKind_t;
 
+/* ── Drive arc-turn motion direction ──────────────────────────────────────── */
+typedef enum
+{
+    DRIVE_ARC_NONE = 0,
+    DRIVE_ARC_FL,   /* forward-left  arc turn */
+    DRIVE_ARC_FR,   /* forward-right arc turn */
+    DRIVE_ARC_BL,   /* backward-left  arc turn */
+    DRIVE_ARC_BR    /* backward-right arc turn */
+} DriveArcMotion_t;
+
 /* ── Parsed command type ─────────────────────────────────────────────────── */
 typedef enum
 {
@@ -79,7 +89,8 @@ typedef enum
     TCMD_MAGINIT,               /* maginit : init QMC5883P magnetometer */
     TCMD_MAGRAW,                /* magraw : read raw magnetometer X/Y/Z */
     TCMD_MAGIMU,                /* magimu : read compact GUI-friendly magnetometer X/Y/Z */
-    TCMD_MAGHELP                /* maghelp : show magnetometer commands */
+    TCMD_MAGHELP,               /* maghelp : show magnetometer commands */
+    TCMD_DRIVE_ARC              /* drive <rpm|duty> <target> <fl|fr|bl|br> tr <decimal> */
 } TerminalCommandType_t;
 
 /* ── Parse result ────────────────────────────────────────────────────────── */
@@ -110,6 +121,16 @@ typedef struct
     TuneMotorTarget_t tuneTarget;
     TuneCmdKind_t     tuneKind;
     char              tunePayload[TUNE_PAYLOAD_MAX];
+
+    /* TCMD_DRIVE_ARC: arc-turn drive command fields.
+     * driveIsDuty          — true for "drive duty", false for "drive rpm".
+     * driveTarget          — target RPM (0..200) or duty (0..4000).
+     * driveTurnRatioPermille — turn ratio as fixed-point 0..1000.
+     * driveMotion          — which arc direction (FL/FR/BL/BR). */
+    bool              driveIsDuty;
+    uint16_t          driveTarget;
+    uint16_t          driveTurnRatioPermille;
+    DriveArcMotion_t  driveMotion;
 } TerminalCommand_t;
 
 /* ── Public API ─────────────────────────────────────────────────────────── */

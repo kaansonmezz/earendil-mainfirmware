@@ -4,8 +4,7 @@
 #include "logger.h"
 #include <string.h>
 
-#define MOTOR_DMA_RX_MSG_MAX 128
-#define NUM_MOTOR_UARTS      4
+#define NUM_MOTOR_UARTS  4
 
 #define DMA_BUFFER __attribute__((section(".dma_buffer"), aligned(32)))
 
@@ -14,15 +13,21 @@ static uint8_t uart4_rx_dma_buffer[MOTOR_DMA_RX_BUFFER_SIZE] DMA_BUFFER;
 static uint8_t uart5_rx_dma_buffer[MOTOR_DMA_RX_BUFFER_SIZE] DMA_BUFFER;
 static uint8_t uart7_rx_dma_buffer[MOTOR_DMA_RX_BUFFER_SIZE] DMA_BUFFER;
 
-/* ── Software message slots (written in ISR, read in main loop) ─────────── */
+/* ── Per-UART line assembly state ───────────────────────────────────────── */
 typedef struct
 {
-    uint8_t      msg[MOTOR_DMA_RX_MSG_MAX + 1];
-    uint16_t     size;
-    volatile bool ready;
-} MotorRxSlot_t;
+    char            line[MOTOR_RX_LINE_MAX + 1];
+    uint16_t        len;
+    volatile uint32_t dropped;
+} MotorRxLineQueue_t;
 
-static MotorRxSlot_t rxSlot[NUM_MOTOR_UARTS];
+static MotorRxLineQueue_t lineQueue[NUM_MOTOR_UARTS];
+
+/* Complete-line ring buffer (written in ISR, read in main loop).
+ * ISR increments linesReady; main loop drains it to zero. */
+static char     lineBuf[NUM_MOTOR_UARTS][MOTOR_RX_QUEUE_DEPTH][MOTOR_RX_LINE_MAX + 1];
+static uint8_t  lineHead[NUM_MOTOR_UARTS];
+static volatile uint8_t linesReady[NUM_MOTOR_UARTS];
 
 static const char *slotLabel[] = { "USART2_RX", "UART4_RX", "UART5_RX", "UART7_RX" };
 
@@ -172,7 +177,9 @@ void MotorUartDma_Init(void)
     memset(uart4_rx_dma_buffer, 0, sizeof(uart4_rx_dma_buffer));
     memset(uart5_rx_dma_buffer, 0, sizeof(uart5_rx_dma_buffer));
     memset(uart7_rx_dma_buffer, 0, sizeof(uart7_rx_dma_buffer));
-    memset(rxSlot, 0, sizeof(rxSlot));
+    memset(lineQueue, 0, sizeof(lineQueue));
+    memset(lineHead, 0, sizeof(lineHead));
+    memset((void *)linesReady, 0, sizeof(linesReady));
 
     for (int i = 0; i < NUM_MOTOR_UARTS; i++)
     {
@@ -232,13 +239,18 @@ void MotorUartDma_Update(void)
         }
     }
 
-    /* Process received messages */
+    /* Drain queued complete lines from each UART */
     for (int i = 0; i < NUM_MOTOR_UARTS; i++)
     {
-        if (rxSlot[i].ready)
+        uint8_t count = linesReady[i];
+        if (count == 0)
+            continue;
+
+        uint8_t rdIdx = 0;
+
+        for (uint8_t n = 0; n < count; n++)
         {
-            rxSlot[i].ready = false;
-            const char *line = (const char *)rxSlot[i].msg;
+            const char *line = lineBuf[i][rdIdx];
 
             /* Detect compact F411 telemetry (contains RPM:, PWM_ACT:, RXB:).
              * If matched, re-log with [TEL][MOTOR] tag so the GUI can parse
@@ -253,7 +265,17 @@ void MotorUartDma_Update(void)
             {
                 Logger_Log(LOG_INFO, "[%s] %s", slotLabel[i], line);
             }
+
+            rdIdx++;
+            if (rdIdx >= MOTOR_RX_QUEUE_DEPTH)
+                rdIdx = 0;
         }
+
+        /* Reset queue head and ready count after draining.
+         * linesReady is uint8_t so this is effectively atomic on Cortex-M
+         * for values <= 255, which is well within our queue depth of 8. */
+        linesReady[i] = 0;
+        lineHead[i]   = 0;
     }
 }
 
@@ -267,19 +289,50 @@ void HAL_UARTEx_RxEventCallback(UART_HandleTypeDef *huart, uint16_t Size)
 
     if (Size > 0 && Size <= MOTOR_DMA_RX_BUFFER_SIZE)
     {
-        uint16_t copyLen = (Size < MOTOR_DMA_RX_MSG_MAX) ? Size : MOTOR_DMA_RX_MSG_MAX;
-        memcpy(rxSlot[idx].msg, diag[idx].dmaBuf, copyLen);
-        rxSlot[idx].msg[copyLen] = '\0';
-        rxSlot[idx].size = copyLen;
-        rxSlot[idx].ready = true;
+        MotorRxLineQueue_t *q = &lineQueue[idx];
+        const uint8_t *dmaBuf = diag[idx].dmaBuf;
 
         /* Notify safety manager of motor RX activity for link-loss tracking.
          * Safe to call from ISR: SafetyManager_NotifyRx() only writes a tick
-         * value and clears a flag — no logging, no blocking. */
+         * value and clears a flag -- no logging, no blocking. */
         MotorId_t motor;
         if (GetMotorIdFromUart(huart, &motor))
         {
             SafetyManager_NotifyRx(motor);
+        }
+
+        for (uint16_t j = 0; j < Size; j++)
+        {
+            uint8_t ch = dmaBuf[j];
+
+            if (ch == '\n')
+            {
+                q->line[q->len] = '\0';
+
+                if (linesReady[idx] < MOTOR_RX_QUEUE_DEPTH)
+                {
+                    uint8_t wrSlot = lineHead[idx] + linesReady[idx];
+                    if (wrSlot >= MOTOR_RX_QUEUE_DEPTH)
+                        wrSlot -= MOTOR_RX_QUEUE_DEPTH;
+                    memcpy(lineBuf[idx][wrSlot], q->line, q->len + 1);
+                    linesReady[idx]++;
+                }
+                else
+                {
+                    q->dropped++;
+                }
+
+                q->len = 0;
+            }
+            else if (ch == '\r')
+            {
+                /* skip CR */
+            }
+            else
+            {
+                if (q->len < MOTOR_RX_LINE_MAX)
+                    q->line[q->len++] = (char)ch;
+            }
         }
     }
 

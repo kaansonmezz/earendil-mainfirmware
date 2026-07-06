@@ -74,7 +74,8 @@ bool Command_IsModeTransition(const TerminalCommand_t *cmd)
 
 bool Command_IsMotionCommand(const TerminalCommand_t *cmd)
 {
-    return (cmd != NULL && cmd->type == TCMD_MOTION);
+    return (cmd != NULL && (cmd->type == TCMD_MOTION ||
+                            cmd->type == TCMD_DRIVE_ARC));
 }
 
 /* ── Operating-mode transition ──────────────────────────────────────────────
@@ -217,6 +218,15 @@ void CommandHandler_PrintHelp(void)
     Logger_Log(LOG_INFO, "  rd0..rd4000      Right turn PWM/duty command");
     Logger_Log(LOG_INFO, "  ld0..ld4000      Left turn PWM/duty command");
     Logger_Log(LOG_INFO, "");
+    Logger_Log(LOG_INFO, "Arc-turn drive commands:");
+    Logger_Log(LOG_INFO, "  drive rpm 0..200 <fl|fr|bl|br> tr 0.00..1.00");
+    Logger_Log(LOG_INFO, "  drive duty 0..4000 <fl|fr|bl|br> tr 0.00..1.00");
+    Logger_Log(LOG_INFO, "Examples:");
+    Logger_Log(LOG_INFO, "  drive rpm 100 fl tr 0.50");
+    Logger_Log(LOG_INFO, "  drive rpm 100 fr tr 0.50");
+    Logger_Log(LOG_INFO, "  drive duty 2000 bl tr 0.50");
+    Logger_Log(LOG_INFO, "  drive duty 2000 br tr 0.50");
+    Logger_Log(LOG_INFO, "");
     Logger_Log(LOG_INFO, "Common commands:");
     Logger_Log(LOG_INFO, "  stop             Stop motors");
     Logger_Log(LOG_INFO, "  brake            Send brake command: x");
@@ -348,6 +358,10 @@ void CommandHandler_Handle(const TerminalCommand_t *cmd)
                 }
                 break;
 
+            case TCMD_DRIVE_ARC:
+                Logger_Log(LOG_WARN, "[DRIVE] Command rejected in DISARM");
+                return;
+
             default:
                 allowed = false;
                 break;
@@ -399,6 +413,16 @@ void CommandHandler_Handle(const TerminalCommand_t *cmd)
             }
 
             MotionController_Execute(&cmd->motion);
+            break;
+        }
+
+        case TCMD_DRIVE_ARC:
+        {
+            uint16_t inner, outer;
+            MotionController_ExecuteArcTurn(
+                cmd->driveIsDuty, cmd->driveTarget,
+                cmd->driveMotion, cmd->driveTurnRatioPermille,
+                &inner, &outer);
             break;
         }
 

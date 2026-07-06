@@ -1,4 +1,5 @@
 #include "terminal_parser.h"
+#include "logger.h"
 #include <string.h>
 #include <stdlib.h>
 #include <ctype.h>
@@ -88,6 +89,68 @@ static bool NextToken(const char **pp, char *tok, size_t tksz)
     tok[i] = '\0';
     *pp = p + i;
     return i > 0;
+}
+
+/* Parse a decimal turn-ratio string into a permille value (0..1000).
+ * Accepted: "0", "0.0", "0.00", "0.5", "0.50", "0.75", "1", "1.0", "1.00".
+ * Rejected: "", ".", "500", "1.50", "-0.10", "abc", "0.abc", "1.01". */
+static bool ParseDriveTurnRatioPermille(const char *s, uint16_t *outPermille)
+{
+    if (s == NULL || outPermille == NULL || *s == '\0')
+        return false;
+
+    const char *dot = strchr(s, '.');
+
+    /* ── No decimal point: only "0" or "1" accepted ────────────────────── */
+    if (dot == NULL)
+    {
+        if (strcmp(s, "0") == 0) { *outPermille = 0;    return true; }
+        if (strcmp(s, "1") == 0) { *outPermille = 1000; return true; }
+        return false;
+    }
+
+    /* ── Decimal point present ─────────────────────────────────────────── */
+    if (dot == s)           return false;   /* starts with dot: ".50"  */
+    if ((dot - s) != 1)     return false;   /* multi-digit int: "10.0" */
+    if (s[0] != '0' && s[0] != '1')
+        return false;                       /* int part must be 0 or 1 */
+
+    const char *frac = dot + 1;
+    if (*frac == '\0')      return false;   /* trailing dot: "0."      */
+
+    uint16_t fracVal = 0;
+    int digits = 0;
+
+    while (*frac != '\0')
+    {
+        if (*frac < '0' || *frac > '9')
+            return false;                   /* non-digit char          */
+        if (digits >= 3)
+            return false;                   /* too many fraction digits */
+        fracVal = (uint16_t)(fracVal * 10U + (uint16_t)(*frac - '0'));
+        digits++;
+        frac++;
+    }
+
+    /* Pad to 3 digits: 0.5 -> 500, 0.50 -> 500, 0.500 -> 500 */
+    while (digits < 3)
+    {
+        fracVal = (uint16_t)(fracVal * 10U);
+        digits++;
+    }
+
+    /* "1.xxx" — only "1.0", "1.00", "1.000" accepted (i.e. fracVal == 0) */
+    if (s[0] == '1')
+    {
+        if (fracVal != 0)
+            return false;
+        *outPermille = 1000;
+        return true;
+    }
+
+    /* "0.xxx" — fracVal is already the permille */
+    *outPermille = fracVal;
+    return true;
 }
 
 /* ── Tuning command parser ─────────────────────────────────────────────────
@@ -772,6 +835,119 @@ bool TerminalParser_Parse(const char *line, TerminalCommand_t *outResult)
     {
         outResult->type   = TCMD_OP_MODE;
         outResult->opMode = ROVER_MODE_AUTONOMOUS;
+        return true;
+    }
+
+    /* ── 9a. drive <rpm|duty> <target> <fl|fr|bl|br> tr <decimal> ──────
+     *  Arc-turn drive command.  Must be parsed before the single-letter
+     *  motion commands and the duty-prefix commands (fd/bd/rd/ld). */
+    if (strncmp(buf, "drive ", 6) == 0)
+    {
+        const char *p = buf + 6;
+
+        /* token: mode */
+        char modeTok[8];
+        if (!NextToken(&p, modeTok, sizeof(modeTok)))
+            return false;
+
+        bool isDuty;
+        int maxTarget;
+        if (strcmp(modeTok, "rpm") == 0)
+        {
+            isDuty = false;
+            maxTarget = RPM_MAX;
+        }
+        else if (strcmp(modeTok, "duty") == 0)
+        {
+            isDuty = true;
+            maxTarget = DUTY_MAX;
+        }
+        else
+        {
+            Logger_Log(LOG_ERROR, "[DRIVE] Invalid mode");
+            return false;
+        }
+
+        /* token: target */
+        char targetTok[8];
+        if (!NextToken(&p, targetTok, sizeof(targetTok)))
+        {
+            Logger_Log(LOG_ERROR, "[DRIVE] Invalid target");
+            return false;
+        }
+        if (!IsInt(targetTok))
+        {
+            Logger_Log(LOG_ERROR, "[DRIVE] Invalid target");
+            return false;
+        }
+        int target = atoi(targetTok);
+        if (target < 0 || target > maxTarget)
+        {
+            Logger_Log(LOG_ERROR, "[DRIVE] Invalid target");
+            return false;
+        }
+
+        /* token: motion direction (fl/fr/bl/br only) */
+        char motionTok[4];
+        if (!NextToken(&p, motionTok, sizeof(motionTok)))
+        {
+            Logger_Log(LOG_ERROR, "[DRIVE] Invalid motion");
+            return false;
+        }
+
+        DriveArcMotion_t motion = DRIVE_ARC_NONE;
+        if      (strcmp(motionTok, "fl") == 0) motion = DRIVE_ARC_FL;
+        else if (strcmp(motionTok, "fr") == 0) motion = DRIVE_ARC_FR;
+        else if (strcmp(motionTok, "bl") == 0) motion = DRIVE_ARC_BL;
+        else if (strcmp(motionTok, "br") == 0) motion = DRIVE_ARC_BR;
+        else
+        {
+            Logger_Log(LOG_ERROR, "[DRIVE] Invalid motion");
+            return false;
+        }
+
+        /* token: "tr" keyword */
+        char trKw[4];
+        if (!NextToken(&p, trKw, sizeof(trKw)))
+        {
+            Logger_Log(LOG_ERROR, "[DRIVE] Missing tr token");
+            return false;
+        }
+        if (strcmp(trKw, "tr") != 0)
+        {
+            Logger_Log(LOG_ERROR, "[DRIVE] Missing tr token");
+            return false;
+        }
+
+        /* token: decimal turn ratio 0.00..1.00 */
+        char trTok[12];
+        if (!NextToken(&p, trTok, sizeof(trTok)))
+        {
+            Logger_Log(LOG_ERROR, "[DRIVE] Invalid tr");
+            return false;
+        }
+
+        uint16_t trPermille;
+        if (!ParseDriveTurnRatioPermille(trTok, &trPermille))
+        {
+            Logger_Log(LOG_ERROR, "[DRIVE] Invalid tr");
+            return false;
+        }
+
+        /* No extra tokens allowed */
+        while (*p == ' ')
+            p++;
+        if (*p != '\0')
+        {
+            Logger_Log(LOG_ERROR, "[DRIVE] Invalid format");
+            return false;
+        }
+
+        outResult->type                   = TCMD_DRIVE_ARC;
+        outResult->driveIsDuty            = isDuty;
+        outResult->driveTarget            = (uint16_t)target;
+        outResult->driveTurnRatioPermille = trPermille;
+        outResult->driveMotion            = motion;
         return true;
     }
 

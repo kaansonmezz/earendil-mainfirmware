@@ -3,8 +3,8 @@
 ../Core/Src/command_handler.c:55:20:MotorTagName	16	static
 ../Core/Src/command_handler.c:70:6:Command_IsModeTransition	16	static
 ../Core/Src/command_handler.c:75:6:Command_IsMotionCommand	16	static
-../Core/Src/command_handler.c:84:13:HandleOperatingMode	16	static
-../Core/Src/command_handler.c:130:13:WaitForTxDrain	24	static
-../Core/Src/command_handler.c:141:13:HandleControlModeSwitch	24	static
-../Core/Src/command_handler.c:192:6:CommandHandler_PrintHelp	8	static
-../Core/Src/command_handler.c:281:6:CommandHandler_Handle	224	static
+../Core/Src/command_handler.c:85:13:HandleOperatingMode	16	static
+../Core/Src/command_handler.c:131:13:WaitForTxDrain	24	static
+../Core/Src/command_handler.c:142:13:HandleControlModeSwitch	24	static
+../Core/Src/command_handler.c:193:6:CommandHandler_PrintHelp	8	static
+../Core/Src/command_handler.c:291:6:CommandHandler_Handle	224	static
