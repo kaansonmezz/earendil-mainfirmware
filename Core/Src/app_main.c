@@ -13,6 +13,7 @@
 #include "safety_manager.h"
 #include "motor_uart_dma.h"
 #include "motor_tx_dma.h"
+#include "motor_tuning_config.h"
 #include "i2c_scanner.h"
 #include "imu_mpu9250.h"
 #include "stm32h7xx_hal.h"

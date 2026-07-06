@@ -7,6 +7,7 @@
 #include "operating_mode.h"
 #include "safety_manager.h"
 #include "terminal_if.h"
+#include "motor_tuning_config.h"
 #include "logger.h"
 #include "i2c_scanner.h"
 #include "imu_mpu9250.h"
@@ -48,6 +49,7 @@ static bool IsSafeRawPayload(const char *p)
             strcmp(p, "identify")  == 0 ||
             strcmp(p, "stop")      == 0 ||
             strcmp(p, "x")         == 0 ||
+            strcmp(p, "cfg")       == 0 ||
             strcmp(p, "mode speed")== 0 ||
             strcmp(p, "mode duty") == 0);
 }
@@ -285,6 +287,15 @@ void CommandHandler_PrintHelp(void)
     Logger_Log(LOG_INFO, "  FL telper MS");
     Logger_Log(LOG_INFO, "  ALL base / boost / kickduty / kickms / ramp / pi / telper");
     Logger_Log(LOG_INFO, "");
+    Logger_Log(LOG_INFO, "Config cache:");
+    Logger_Log(LOG_INFO, "  cfgcache            Print cached tuning config for all motors");
+    Logger_Log(LOG_INFO, "  cfgcache FL         Print cached config for Front Left");
+    Logger_Log(LOG_INFO, "  cfgcache FR         Print cached config for Front Right");
+    Logger_Log(LOG_INFO, "  cfgcache RL         Print cached config for Rear Left");
+    Logger_Log(LOG_INFO, "  cfgcache RR         Print cached config for Rear Right");
+    Logger_Log(LOG_INFO, "  cfgread FL          Send 'FL cfg' and cache response");
+    Logger_Log(LOG_INFO, "  cfgread all         Send cfg to all motors");
+    Logger_Log(LOG_INFO, "");
     Logger_Log(LOG_INFO, "  help             Show this command list");
 }
 
@@ -334,6 +345,8 @@ void CommandHandler_Handle(const TerminalCommand_t *cmd)
             case TCMD_MAGRAW:                /* magraw (query) */
             case TCMD_MAGIMU:                /* magimu (query) */
             case TCMD_MAGHELP:               /* maghelp (query) */
+            case TCMD_CFGCACHE:              /* cfgcache (query) */
+            case TCMD_CFGREAD:               /* cfgread (query) */
                 allowed = true;
                 break;
 
@@ -836,6 +849,44 @@ void CommandHandler_Handle(const TerminalCommand_t *cmd)
                                                  cmd->tunePayload))
             {
                 Logger_Log(LOG_ERROR, "[TUNE] Dispatch failed");
+            }
+            break;
+        }
+
+        case TCMD_CFGCACHE:
+        {
+            if (cmd->cfgMotor == MOTOR_COUNT)
+                MotorTuningConfig_PrintAll();
+            else
+                MotorTuningConfig_Print(cmd->cfgMotor);
+            break;
+        }
+
+        case TCMD_CFGREAD:
+        {
+            if (cmd->cfgMotor == MOTOR_COUNT)
+            {
+                /* cfgread all — send cfg to all four motors */
+                MotorDispatcher_SendRawToMotor(MOTOR_FL, "cfg");
+                MotorDispatcher_SendRawToMotor(MOTOR_FR, "cfg");
+                MotorDispatcher_SendRawToMotor(MOTOR_RL, "cfg");
+                MotorDispatcher_SendRawToMotor(MOTOR_RR, "cfg");
+                Logger_Log(LOG_INFO, "[CFGREAD] sent cfg to all motors");
+            }
+            else
+            {
+                /* cfgread single motor — e.g. "RL cfg" */
+                const char *tag = "??";
+                switch (cmd->cfgMotor)
+                {
+                    case MOTOR_FL: tag = "FL"; break;
+                    case MOTOR_FR: tag = "FR"; break;
+                    case MOTOR_RL: tag = "RL"; break;
+                    case MOTOR_RR: tag = "RR"; break;
+                    default: break;
+                }
+                MotorDispatcher_SendRawToMotor(cmd->cfgMotor, "cfg");
+                Logger_Log(LOG_INFO, "[CFGREAD] sent cfg to %s", tag);
             }
             break;
         }

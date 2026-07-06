@@ -12,6 +12,7 @@
 "./Core/Src/motor_dispatcher.o"
 "./Core/Src/motor_link.o"
 "./Core/Src/motor_protocol.o"
+"./Core/Src/motor_tuning_config.o"
 "./Core/Src/motor_tx_dma.o"
 "./Core/Src/motor_uart_dma.o"
 "./Core/Src/operating_mode.o"

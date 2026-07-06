@@ -90,7 +90,9 @@ typedef enum
     TCMD_MAGRAW,                /* magraw : read raw magnetometer X/Y/Z */
     TCMD_MAGIMU,                /* magimu : read compact GUI-friendly magnetometer X/Y/Z */
     TCMD_MAGHELP,               /* maghelp : show magnetometer commands */
-    TCMD_DRIVE_ARC              /* drive <rpm|duty> <target> <fl|fr|bl|br> tr <decimal> */
+    TCMD_DRIVE_ARC,             /* drive <rpm|duty> <target> <fl|fr|bl|br> tr <decimal> */
+    TCMD_CFGCACHE,              /* cfgcache [FL|FR|RL|RR] : print cached tuning config */
+    TCMD_CFGREAD                /* cfgread FL|FR|RL|RR|all : request cfg from motor(s) */
 } TerminalCommandType_t;
 
 /* ── Parse result ────────────────────────────────────────────────────────── */
@@ -131,6 +133,10 @@ typedef struct
     uint16_t          driveTarget;
     uint16_t          driveTurnRatioPermille;
     DriveArcMotion_t  driveMotion;
+
+    /* TCMD_CFGCACHE / TCMD_CFGREAD: target motor.
+     * MOTOR_COUNT means "all motors" (bare cfgcache / cfgread all). */
+    MotorId_t         cfgMotor;
 } TerminalCommand_t;
 
 /* ── Public API ─────────────────────────────────────────────────────────── */

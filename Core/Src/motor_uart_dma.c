@@ -1,6 +1,7 @@
 #include "motor_uart_dma.h"
 #include "motor_tx_dma.h"
 #include "safety_manager.h"
+#include "motor_tuning_config.h"
 #include "logger.h"
 #include <string.h>
 
@@ -192,6 +193,8 @@ void MotorUartDma_Init(void)
         diag[i].last_error_tick        = 0;
         diag[i].last_report_tick       = 0;
     }
+
+    MotorTuningConfig_Init();
 }
 
 void MotorUartDma_StartAllRx(void)
@@ -252,10 +255,12 @@ void MotorUartDma_Update(void)
         {
             const char *line = lineBuf[i][rdIdx];
 
-            /* Detect compact F411 telemetry (contains RPM:, PWM_ACT:, RXB:).
-             * If matched, re-log with [TEL][MOTOR] tag so the GUI can parse
-             * it unambiguously. */
-            if (strstr(line, "RPM:") != NULL &&
+            /* Detect compact F411 telemetry.  The payload must START with
+             * "RPM:" to be classified as telemetry.  Lines like
+             * "[ERR] Unknown commandRPM:0,..." must NOT be classified as
+             * telemetry — they are error lines that happen to contain RPM
+             * data after the error prefix. */
+            if (strncmp(line, "RPM:", 4) == 0 &&
                 strstr(line, "PWM_ACT:") != NULL &&
                 strstr(line, "RXB:") != NULL)
             {
@@ -265,6 +270,12 @@ void MotorUartDma_Update(void)
             {
                 Logger_Log(LOG_INFO, "[%s] %s", slotLabel[i], line);
             }
+
+            /* Feed every non-telemetry line to the tuning config parser.
+             * The parser internally skips telemetry/status lines and only
+             * caches Kp_m/Ki_m, Base, and Boost payloads. */
+            MotorTuningConfig_ProcessLine(
+                MotorTuningConfig_SlotToMotorId(i), line);
 
             rdIdx++;
             if (rdIdx >= MOTOR_RX_QUEUE_DEPTH)

@@ -512,6 +512,45 @@ bool TerminalParser_Parse(const char *line, TerminalCommand_t *outResult)
         return true;
     }
 
+    /* ── 5c. cfgcache [FL|FR|RL|RR] ──────────────────────────────────── */
+    if (strncmp(buf, "cfgcache", 8) == 0)
+    {
+        if (buf[8] == '\0')
+        {
+            /* bare "cfgcache" — print all */
+            outResult->type = TCMD_CFGCACHE;
+            outResult->cfgMotor = MOTOR_COUNT;
+            return true;
+        }
+        if (buf[8] == ' ')
+        {
+            const char *arg = buf + 9;
+            MotorId_t m = MOTOR_COUNT;
+            if      (strcmp(arg, "fl") == 0) m = MOTOR_FL;
+            else if (strcmp(arg, "fr") == 0) m = MOTOR_FR;
+            else if (strcmp(arg, "rl") == 0) m = MOTOR_RL;
+            else if (strcmp(arg, "rr") == 0) m = MOTOR_RR;
+            if (m != MOTOR_COUNT)
+            {
+                outResult->type = TCMD_CFGCACHE;
+                outResult->cfgMotor = m;
+                return true;
+            }
+        }
+    }
+
+    /* ── 5d. cfgread FL|FR|RL|RR|all ─────────────────────────────────── */
+    if (strncmp(buf, "cfgread", 7) == 0 && buf[7] == ' ')
+    {
+        const char *arg = buf + 8;
+        outResult->type = TCMD_CFGREAD;
+        if      (strcmp(arg, "fl") == 0)  { outResult->cfgMotor = MOTOR_FL; return true; }
+        else if (strcmp(arg, "fr") == 0)  { outResult->cfgMotor = MOTOR_FR; return true; }
+        else if (strcmp(arg, "rl") == 0)  { outResult->cfgMotor = MOTOR_RL; return true; }
+        else if (strcmp(arg, "rr") == 0)  { outResult->cfgMotor = MOTOR_RR; return true; }
+        else if (strcmp(arg, "all") == 0) { outResult->cfgMotor = MOTOR_COUNT; return true; }
+    }
+
     /* ── 5c. i2cscan (I2C bus scanner) ─────────────────────────────── */
     if (strcmp(buf, "i2cscan") == 0)
     {

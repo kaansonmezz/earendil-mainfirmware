@@ -462,12 +462,21 @@ class MotorSettingsDialog(QDialog):
         return row
 
     def _build_read_row(self) -> QHBoxLayout:
-        """Placeholder Read buttons - one per motor (no Read All)."""
+        """Read buttons — one per motor + status label."""
         row = QHBoxLayout()
         row.setSpacing(6)
+        self._read_buttons: dict[str, QPushButton] = {}
         for motor in self.MOTOR_TAGS:
             btn = QPushButton(f"Read {motor}")
+            btn.clicked.connect(lambda _=False, m=motor: self._on_read_motor(m))
             row.addWidget(btn, 1)
+            self._read_buttons[motor] = btn
+        self._lbl_read_status = QLabel("")
+        self._lbl_read_status.setMinimumWidth(140)
+        c = self._gui._colors()
+        self._lbl_read_status.setStyleSheet(
+            f"color: {c['text_muted']}; font-size: 11px;")
+        row.addWidget(self._lbl_read_status)
         return row
 
     # ======================================================================
@@ -647,6 +656,106 @@ class MotorSettingsDialog(QDialog):
             btn.setEnabled(enabled)
         if hasattr(self, "_btn_reset"):
             self._btn_reset.setEnabled(enabled)
+
+    # ======================================================================
+    #  Read config from H7 cache
+    # ======================================================================
+
+    def _on_read_motor(self, motor: str):
+        """Handle Read FL/FR/RL/RR button click."""
+        # Disable read buttons during read
+        for btn in self._read_buttons.values():
+            btn.setEnabled(False)
+        self._set_read_status(motor, f"Reading {motor}...", success=None)
+        self._gui.cfgread_start(motor, self)
+
+    def _set_read_status(self, motor: str, text: str, success: bool | None):
+        """Update the read status label.
+
+        success=True  -> green, success=False -> red, None -> muted.
+        """
+        if not hasattr(self, "_lbl_read_status"):
+            return
+        c = self._gui._colors()
+        if success is True:
+            color = c.get("success_bright", "#1E8E3E")
+        elif success is False:
+            color = c.get("danger_bright", "#E02020")
+        else:
+            color = c.get("text_muted", "#8E8E93")
+        self._lbl_read_status.setText(text)
+        self._lbl_read_status.setStyleSheet(
+            f"color: {color}; font-size: 11px;")
+        # Re-enable read buttons after completion or timeout
+        if success is not None:
+            for btn in self._read_buttons.values():
+                btn.setEnabled(True)
+
+    def apply_f411_tuning_config(self, motor: str, cfg: dict):
+        """Fill dialog fields from a parsed cfgcache config dict."""
+        self._gui._log_info(
+            f"[CFGREAD] Applying {motor} config: {cfg}"
+        )
+
+        # Kp / Ki — display human values (kp_m / 1000)
+        kp_m = cfg.get("kp_m")
+        ki_m = cfg.get("ki_m")
+        if kp_m is not None:
+            self._kp_edit.setText(f"{kp_m / 1000.0:g}")
+        if ki_m is not None:
+            self._ki_edit.setText(f"{ki_m / 1000.0:g}")
+
+        # Base PWM slots
+        base = cfg.get("base")
+        if base:
+            for i in range(min(len(base), self.NUM_SLOTS)):
+                self._base_edits[i].setText(str(base[i]))
+
+        # Boost PWM slots
+        boost = cfg.get("boost")
+        if boost:
+            for i in range(min(len(boost), self.NUM_SLOTS)):
+                self._boost_edits[i].setText(str(boost[i]))
+
+        # Boost MS
+        if cfg.get("boost_ms") is not None:
+            self._boostms_edit.setText(str(cfg["boost_ms"]))
+
+        # Kick Duty / Kick MS
+        if cfg.get("kick_duty") is not None:
+            self._kick_duty_edit.setText(str(cfg["kick_duty"]))
+        if cfg.get("kick_ms") is not None:
+            self._kick_ms_edit.setText(str(cfg["kick_ms"]))
+
+        # Ramp Up / Down
+        if cfg.get("ramp_up") is not None:
+            self._ramp_up_edit.setText(str(cfg["ramp_up"]))
+        if cfg.get("ramp_down") is not None:
+            self._ramp_dn_edit.setText(str(cfg["ramp_down"]))
+
+        # Telemetry Period
+        if cfg.get("telper") is not None:
+            self._telper_edit.setText(str(cfg["telper"]))
+
+        # Log actual field values after update
+        self._gui._log_info(
+            f"[CFGREAD] Applied fields: "
+            f"Kp={self._kp_edit.text()} Ki={self._ki_edit.text()} "
+            f"BoostMS={self._boostms_edit.text()} "
+            f"Base={[e.text() for e in self._base_edits]} "
+            f"Boost={[e.text() for e in self._boost_edits]} "
+            f"KickDuty={self._kick_duty_edit.text()} "
+            f"KickMS={self._kick_ms_edit.text()} "
+            f"RampUp={self._ramp_up_edit.text()} "
+            f"RampDown={self._ramp_dn_edit.text()} "
+            f"TelPer={self._telper_edit.text()}"
+        )
+
+    def closeEvent(self, event):
+        """Clean up pending cfgread when dialog is closed."""
+        if self._gui._cfgread_dialog is self:
+            self._gui._cfgread_cleanup()
+        super().closeEvent(event)
 
 
 # ============================================================================
@@ -1334,6 +1443,27 @@ class EarendilControlGui(QMainWindow):
         self._tuning_send_timer.setInterval(self.TUNING_SEND_INTERVAL_MS)
         self._tuning_send_timer.timeout.connect(
             self._send_next_f411_tuning_command)
+
+        # -- cfgcache read state ----------------------------------------
+        self._cfgread_motor: str | None = None          # motor being read
+        self._cfgread_dialog = None                      # MotorSettingsDialog ref
+        self._cfgread_pending: dict = {}                 # accumulated cfg lines
+        self._cfgread_retry_count: int = 0
+        self._cfgread_retry_timer = QTimer(self)
+        self._cfgread_retry_timer.setInterval(400)
+        self._cfgread_retry_timer.timeout.connect(self._cfgread_retry_fetch)
+        self._cfgread_timeout_timer = QTimer(self)
+        self._cfgread_timeout_timer.setSingleShot(True)
+        self._cfgread_timeout_timer.setInterval(2500)
+        self._cfgread_timeout_timer.timeout.connect(self._cfgread_on_timeout)
+        self._cfgread_apply_timer = QTimer(self)
+        self._cfgread_apply_timer.setSingleShot(True)
+        self._cfgread_apply_timer.setInterval(150)
+        self._cfgread_apply_timer.timeout.connect(self._cfgread_apply_now)
+
+        # -- Persistent cfg cache (survives dialog close/reopen) --------
+        self._last_f411_cfg_by_motor: dict[str, dict] = {}
+        self._last_f411_cfg_motor: str | None = None
 
         # -- IMU/MAG settings dialog reference ---------------------------
         self._imu_settings_dialog: ImuMagSettingsDialog | None = None
@@ -2325,6 +2455,16 @@ class EarendilControlGui(QMainWindow):
                 except Exception:
                     pass
                 self._tuning_dialog_ref = None
+        # Cancel any pending cfgread
+        if self._cfgread_motor is not None:
+            dlg = self._cfgread_dialog
+            if dlg is not None:
+                try:
+                    dlg._set_read_status(
+                        self._cfgread_motor, "Disconnected", success=False)
+                except Exception:
+                    pass
+            self._cfgread_cleanup()
         self._lbl_status.setText("* Disconnected")
         self._style_connection_status()
         self._btn_connect.setText("Connect")
@@ -2347,6 +2487,7 @@ class EarendilControlGui(QMainWindow):
         self._parse_uart_error_line(line)
         self._parse_operating_mode_confirm(line)
         self._parse_imu_line(line)
+        self._parse_cfgcache_line(line)
 
     def _parse_rx_for_motor_state(self, line: str):
         """Update Link column if link-lost/recovered detected."""
@@ -2739,8 +2880,236 @@ class EarendilControlGui(QMainWindow):
         return True
 
     # ======================================================================
-    #  Serial Send
+    #  cfgcache read / parse
     # ======================================================================
+
+    _RE_CFG_VALID = re.compile(
+        r"^\[CFG\]\[(FL|FR|RL|RR)\]\s+valid=(\d+)\s+updates=(\d+)\s+age_ms=(\d+)"
+    )
+    _RE_CFG_PI = re.compile(
+        r"^\[CFG\]\[(FL|FR|RL|RR)\]\s+"
+        r"Kp_m=(-?\d+)\s+Ki_m=(-?\d+)\s+Kp=(-?[\d.]+)\s+Ki=(-?[\d.]+)"
+    )
+    _RE_CFG_BASE = re.compile(
+        r"^\[CFG\]\[(FL|FR|RL|RR)\]\s+Base\s+"
+        r"(\d+)\s+(\d+)\s+(\d+)\s+(\d+)\s+(\d+)\s+(\d+)\s+(\d+)\s+(\d+)"
+    )
+    _RE_CFG_BOOST = re.compile(
+        r"^\[CFG\]\[(FL|FR|RL|RR)\]\s+Boost\s+"
+        r"(\d+)\s+(\d+)\s+(\d+)\s+(\d+)\s+(\d+)\s+(\d+)\s+(\d+)\s+(\d+)\s+ms=(\d+)"
+    )
+    _RE_CFG_RAMP = re.compile(
+        r"^\[CFG\]\[(FL|FR|RL|RR)\]\s+Ramp\s+up=(\d+)\s+down=(\d+)"
+    )
+    _RE_CFG_KICK = re.compile(
+        r"^\[CFG\]\[(FL|FR|RL|RR)\]\s+Kick\s+(ON|OFF)\s+duty=(\d+)\s+ms=(\d+)"
+    )
+    _RE_CFG_TELPER = re.compile(
+        r"^\[CFG\]\[(FL|FR|RL|RR)\]\s+TelPer=(\d+)"
+    )
+
+    def _normalize_cfg_line(self, line: str) -> str:
+        """Strip optional [INFO] / [WARN] / [DEBUG] prefix so regex can
+        match [CFG] at the start of the string.
+
+        H7 Logger_Log prepends e.g. "[INFO] " before the payload:
+            [INFO] [CFG][RL] valid=1 ...
+        After normalization:
+            [CFG][RL] valid=1 ...
+        """
+        idx = line.find("[CFG]")
+        if idx >= 0:
+            return line[idx:]
+        return line
+
+    def _parse_cfgcache_line(self, line: str):
+        """Parse [CFG][MOTOR] lines from H7 cfgcache output.
+
+        Accumulates valid/pi/base/boost/ramp/kick/telper per motor.
+        Uses a short debounce timer so optional trailing lines (Ramp,
+        Kick, TelPer) are captured before applying to the dialog.
+        """
+        line = self._normalize_cfg_line(line)
+
+        # Only process lines that start with [CFG]
+        if not line.startswith("[CFG]"):
+            return
+
+        m = self._RE_CFG_VALID.match(line)
+        if m:
+            motor = m.group(1)
+            self._cfgread_pending.setdefault(motor, {})
+            self._cfgread_pending[motor]["valid"] = int(m.group(2))
+            self._cfgread_pending[motor]["updates"] = int(m.group(3))
+            self._cfgread_debounce_restart(motor)
+            return
+
+        m = self._RE_CFG_PI.match(line)
+        if m:
+            motor = m.group(1)
+            self._cfgread_pending.setdefault(motor, {})
+            self._cfgread_pending[motor]["kp_m"] = int(m.group(2))
+            self._cfgread_pending[motor]["ki_m"] = int(m.group(3))
+            self._cfgread_pending[motor]["has_pi"] = True
+            self._cfgread_debounce_restart(motor)
+            return
+
+        m = self._RE_CFG_BASE.match(line)
+        if m:
+            motor = m.group(1)
+            self._cfgread_pending.setdefault(motor, {})
+            self._cfgread_pending[motor]["base"] = [
+                int(m.group(i)) for i in range(2, 10)
+            ]
+            self._cfgread_pending[motor]["has_base"] = True
+            self._cfgread_debounce_restart(motor)
+            return
+
+        m = self._RE_CFG_BOOST.match(line)
+        if m:
+            motor = m.group(1)
+            self._cfgread_pending.setdefault(motor, {})
+            self._cfgread_pending[motor]["boost"] = [
+                int(m.group(i)) for i in range(2, 10)
+            ]
+            self._cfgread_pending[motor]["boost_ms"] = int(m.group(10))
+            self._cfgread_pending[motor]["has_boost"] = True
+            self._cfgread_debounce_restart(motor)
+            return
+
+        m = self._RE_CFG_RAMP.match(line)
+        if m:
+            motor = m.group(1)
+            self._cfgread_pending.setdefault(motor, {})
+            self._cfgread_pending[motor]["ramp_up"] = int(m.group(2))
+            self._cfgread_pending[motor]["ramp_down"] = int(m.group(3))
+            self._cfgread_debounce_restart(motor)
+            return
+
+        m = self._RE_CFG_KICK.match(line)
+        if m:
+            motor = m.group(1)
+            self._cfgread_pending.setdefault(motor, {})
+            self._cfgread_pending[motor]["kick_enabled"] = m.group(2)
+            self._cfgread_pending[motor]["kick_duty"] = int(m.group(3))
+            self._cfgread_pending[motor]["kick_ms"] = int(m.group(4))
+            self._cfgread_debounce_restart(motor)
+            return
+
+        m = self._RE_CFG_TELPER.match(line)
+        if m:
+            motor = m.group(1)
+            self._cfgread_pending.setdefault(motor, {})
+            self._cfgread_pending[motor]["telper"] = int(m.group(2))
+            self._cfgread_debounce_restart(motor)
+            return
+
+    def _cfgread_debounce_restart(self, motor: str):
+        """Restart the debounce timer.  Called on every [CFG] line so
+        optional trailing lines (Ramp, Kick, TelPer) are accumulated
+        before the final apply."""
+        if motor != self._cfgread_motor:
+            return
+        cfg = self._cfgread_pending.get(motor, {})
+        # Only start debounce once the required parts are present
+        if (cfg.get("valid") == 1
+                and cfg.get("has_pi")
+                and cfg.get("has_base")
+                and cfg.get("has_boost")):
+            self._cfgread_apply_timer.start()
+
+    def _cfgread_apply_now(self):
+        """Debounce timer fired — apply accumulated config to dialog."""
+        motor = self._cfgread_motor
+        if motor is None:
+            return
+        cfg = self._cfgread_pending.get(motor, {})
+        if not (cfg.get("valid") == 1
+                and cfg.get("has_pi")
+                and cfg.get("has_base")
+                and cfg.get("has_boost")):
+            return
+
+        # Stop all timers
+        self._cfgread_apply_timer.stop()
+        self._cfgread_retry_timer.stop()
+        self._cfgread_timeout_timer.stop()
+        dlg = self._cfgread_dialog
+        self._cfgread_cleanup()
+
+        # Store a copy in the persistent cache
+        self._last_f411_cfg_by_motor[motor] = dict(cfg)
+        self._last_f411_cfg_motor = motor
+
+        if dlg is not None:
+            dlg.apply_f411_tuning_config(motor, cfg)
+            dlg._set_read_status(motor, f"Loaded {motor} config", success=True)
+
+    def cfgread_start(self, motor: str, dialog):
+        """Initiate a cfgread sequence for `motor`.
+
+        Sends ``cfgread <MOTOR>`` immediately, then polls ``cfgcache <MOTOR>``
+        after a short delay.  Retries up to 4 times (total ~2 s).
+        """
+        if self._cfgread_motor is not None:
+            self._log_warn(f"[CFGREAD] Read already in progress for {self._cfgread_motor}")
+            return
+
+        self._cfgread_motor = motor
+        self._cfgread_dialog = dialog
+        self._cfgread_pending = {}
+        self._cfgread_retry_count = 0
+
+        # Send cfgread to trigger F411 cfg response
+        self._send_cmd(f"cfgread {motor}")
+        self._log_info(f"[CFGREAD] Sent cfgread {motor}")
+
+        # After 500 ms, request cfgcache
+        QTimer.singleShot(500, self._cfgread_first_fetch)
+
+        # Start timeout
+        self._cfgread_timeout_timer.start()
+
+    def _cfgread_first_fetch(self):
+        """First cfgcache request after initial delay."""
+        if self._cfgread_motor is None:
+            return
+        self._send_cmd(f"cfgcache {self._cfgread_motor}")
+        self._cfgread_retry_count = 1
+        # Start retry timer if not yet complete
+        if self._cfgread_motor is not None:
+            self._cfgread_retry_timer.start()
+
+    def _cfgread_retry_fetch(self):
+        """Retry cfgcache if not yet complete."""
+        if self._cfgread_motor is None:
+            self._cfgread_retry_timer.stop()
+            return
+        self._cfgread_retry_count += 1
+        if self._cfgread_retry_count > 5:
+            self._cfgread_retry_timer.stop()
+            return
+        self._send_cmd(f"cfgcache {self._cfgread_motor}")
+
+    def _cfgread_on_timeout(self):
+        """Called when cfgread timeout expires."""
+        motor = self._cfgread_motor
+        dlg = self._cfgread_dialog
+        self._cfgread_retry_timer.stop()
+        if motor is not None and dlg is not None:
+            dlg._set_read_status(motor, f"Timeout reading {motor}", success=False)
+            self._log_warn(f"[CFGREAD] Timeout reading {motor}")
+        self._cfgread_cleanup()
+
+    def _cfgread_cleanup(self):
+        """Reset cfgread state."""
+        self._cfgread_motor = None
+        self._cfgread_dialog = None
+        self._cfgread_pending = {}
+        self._cfgread_retry_count = 0
+        self._cfgread_retry_timer.stop()
+        self._cfgread_timeout_timer.stop()
+        self._cfgread_apply_timer.stop()
 
     def _send_cmd(self, cmd: str):
         """Send a raw command string to the H7."""
@@ -3370,6 +3739,15 @@ class EarendilControlGui(QMainWindow):
     def _open_motor_settings(self):
         """Open the F411 Motor Tuning Settings dialog (Modal)."""
         dlg = MotorSettingsDialog(self, self)
+
+        # Apply the most recently loaded motor config so the dialog
+        # does not always reopen with hardcoded defaults.
+        if self._last_f411_cfg_motor and self._last_f411_cfg_by_motor:
+            m = self._last_f411_cfg_motor
+            cached = self._last_f411_cfg_by_motor.get(m)
+            if cached:
+                dlg.apply_f411_tuning_config(m, cached)
+
         dlg.exec()
 
     def _open_fault_codes_dialog(self):

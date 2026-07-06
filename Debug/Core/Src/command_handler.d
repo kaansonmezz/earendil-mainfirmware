@@ -37,7 +37,8 @@ Core/Src/command_handler.o: ../Core/Src/command_handler.c \
  ../Core/Inc/motor_tx_dma.h ../Core/Inc/main.h \
  ../Core/Inc/activity_light.h ../Core/Inc/operating_mode.h \
  ../Core/Inc/safety_manager.h ../Core/Inc/terminal_if.h \
- ../Core/Inc/logger.h ../Core/Inc/i2c_scanner.h ../Core/Inc/imu_mpu9250.h \
+ ../Core/Inc/motor_tuning_config.h ../Core/Inc/logger.h \
+ ../Core/Inc/i2c_scanner.h ../Core/Inc/imu_mpu9250.h \
  ../Core/Inc/mag_qmc5883p.h
 ../Core/Inc/command_handler.h:
 ../Core/Inc/terminal_parser.h:
@@ -84,6 +85,7 @@ Core/Src/command_handler.o: ../Core/Src/command_handler.c \
 ../Core/Inc/operating_mode.h:
 ../Core/Inc/safety_manager.h:
 ../Core/Inc/terminal_if.h:
+../Core/Inc/motor_tuning_config.h:
 ../Core/Inc/logger.h:
 ../Core/Inc/i2c_scanner.h:
 ../Core/Inc/imu_mpu9250.h:

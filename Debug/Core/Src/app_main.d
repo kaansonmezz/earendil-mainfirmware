@@ -39,7 +39,8 @@ Core/Src/app_main.o: ../Core/Src/app_main.c ../Core/Inc/app_main.h \
  ../Core/Inc/motor_link.h ../Core/Inc/app_config.h \
  ../Core/Inc/ack_manager.h ../Core/Inc/safety_manager.h \
  ../Core/Inc/motor_uart_dma.h ../Core/Inc/motor_tx_dma.h \
- ../Core/Inc/main.h ../Core/Inc/i2c_scanner.h ../Core/Inc/imu_mpu9250.h
+ ../Core/Inc/main.h ../Core/Inc/motor_tuning_config.h \
+ ../Core/Inc/i2c_scanner.h ../Core/Inc/imu_mpu9250.h
 ../Core/Inc/app_main.h:
 ../Core/Inc/app_config.h:
 ../Drivers/STM32H7xx_HAL_Driver/Inc/stm32h7xx_hal.h:
@@ -91,5 +92,6 @@ Core/Src/app_main.o: ../Core/Src/app_main.c ../Core/Inc/app_main.h \
 ../Core/Inc/motor_uart_dma.h:
 ../Core/Inc/motor_tx_dma.h:
 ../Core/Inc/main.h:
+../Core/Inc/motor_tuning_config.h:
 ../Core/Inc/i2c_scanner.h:
 ../Core/Inc/imu_mpu9250.h:
