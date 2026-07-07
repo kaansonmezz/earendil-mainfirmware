@@ -35,7 +35,7 @@ void MotionController_Init(void)
 static void ApplyMotorPolarity(MotorCmd_t cmds[MOTOR_COUNT])
 {
     static const char *names[] = {"FL", "FR", "RL", "RR"};
-    static const char *dirStr[] = {"STOP", "FWD", "BWD"};
+    static const char *dirStr[] = {"STOP", "FWD", "BWD", "BRK"};
 
     for (int i = 0; i < MOTOR_COUNT; i++)
     {
@@ -143,6 +143,9 @@ void MotionController_ExecuteArcTurn(bool isDuty, uint16_t target,
      * Forward arcs:  left-side = inner, right-side = outer, both MCMD_FORWARD.
      * Backward arcs: left-side = inner, right-side = outer, both MCMD_BACKWARD.
      *
+     * Inner motors at speed 0 (turn ratio 1.0) are actively braked ("x")
+     * instead of coasting, so they resist rotation during the turn.
+     *
      * After ApplyMotorPolarity(), FR/RR (physically reversed) get their
      * direction flipped, producing the correct physical motion. */
     MotorDir_t dir;
@@ -174,10 +177,10 @@ void MotionController_ExecuteArcTurn(bool isDuty, uint16_t target,
             return;
     }
 
-    SetMotorCmd(MOTOR_FL, dir, leftSpd);
-    SetMotorCmd(MOTOR_RL, dir, leftSpd);
-    SetMotorCmd(MOTOR_FR, dir, rightSpd);
-    SetMotorCmd(MOTOR_RR, dir, rightSpd);
+    SetMotorCmd(MOTOR_FL, leftSpd  == 0 ? MCMD_BRAKE : dir, leftSpd);
+    SetMotorCmd(MOTOR_RL, leftSpd  == 0 ? MCMD_BRAKE : dir, leftSpd);
+    SetMotorCmd(MOTOR_FR, rightSpd == 0 ? MCMD_BRAKE : dir, rightSpd);
+    SetMotorCmd(MOTOR_RR, rightSpd == 0 ? MCMD_BRAKE : dir, rightSpd);
 
     ApplyMotorPolarity(motorCmds);
 

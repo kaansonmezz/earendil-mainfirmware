@@ -32,6 +32,10 @@ uint16_t MotorProtocol_Encode(const MotorCmd_t *cmd, char *buf, uint16_t bufSize
             len = snprintf(buf, bufSize, "stop\r\n");
             break;
 
+        case MCMD_BRAKE:
+            len = snprintf(buf, bufSize, "x\r\n");
+            break;
+
         default:
             return 0;
     }

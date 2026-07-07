@@ -29,7 +29,8 @@ typedef enum
 {
     MCMD_STOP = 0,
     MCMD_FORWARD,
-    MCMD_BACKWARD
+    MCMD_BACKWARD,
+    MCMD_BRAKE           /* active brake ("x" to F411) */
 } MotorDir_t;
 
 /* ── Motor command (direction + PWM per wheel) ──────────────────────────── */

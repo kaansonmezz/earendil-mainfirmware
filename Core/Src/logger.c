@@ -38,7 +38,7 @@ void Logger_Log(LogLevel_t level, const char *fmt, ...)
 void Logger_LogMotorCmd(MotorId_t id, const MotorCmd_t *cmd)
 {
     const char *names[] = { "FL", "FR", "RL", "RR" };
-    const char *dirStr[] = { "stop", "f", "b" };
+    const char *dirStr[] = { "stop", "f", "b", "brk" };
     Logger_Log(LOG_INFO, "MOTOR %s -> %s%u", names[id], dirStr[cmd->dir], cmd->pwm);
 }
 

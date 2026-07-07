@@ -28,7 +28,7 @@ void MotorDispatcher_Send(MotorId_t id, const MotorCmd_t *cmd)
     /* Defense-in-depth: while DISARM is active, only STOP/zero framed motor
      * commands may reach the UARTs.  Any FORWARD/BACKWARD frame is dropped
      * here even if a caller bypassed the command_handler gate. */
-    if (OperatingMode_IsDisarm() && cmd->dir != MCMD_STOP)
+    if (OperatingMode_IsDisarm() && cmd->dir != MCMD_STOP && cmd->dir != MCMD_BRAKE)
     {
         Logger_Log(LOG_WARN, "[DISARM] motor dispatch blocked (motor %d)", (int)id);
         return;
@@ -55,6 +55,10 @@ void MotorDispatcher_Send(MotorId_t id, const MotorCmd_t *cmd)
     if (cmd->dir == MCMD_STOP)
     {
         Logger_Log(LOG_INFO, "[TX][%s] stop", names[id]);
+    }
+    else if (cmd->dir == MCMD_BRAKE)
+    {
+        Logger_Log(LOG_INFO, "[TX][%s] brake", names[id]);
     }
     else if (cmd->dir == MCMD_FORWARD)
     {

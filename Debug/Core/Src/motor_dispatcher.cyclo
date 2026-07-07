@@ -1,9 +1,9 @@
 ../Core/Src/motor_dispatcher.c:15:6:MotorDispatcher_Init	2
-../Core/Src/motor_dispatcher.c:23:6:MotorDispatcher_Send	12
-../Core/Src/motor_dispatcher.c:75:6:MotorDispatcher_SendAll	2
-../Core/Src/motor_dispatcher.c:83:6:MotorDispatcher_SendRaw	6
-../Core/Src/motor_dispatcher.c:115:13:FlipRawDirection	10
-../Core/Src/motor_dispatcher.c:146:6:MotorDispatcher_SendRawToMotor	9
-../Core/Src/motor_dispatcher.c:172:6:MotorDispatcher_SendTunePayload	12
-../Core/Src/motor_dispatcher.c:228:14:MotorDispatcher_GetLink	2
-../Core/Src/motor_dispatcher.c:236:6:MotorDispatcher_Update	2
+../Core/Src/motor_dispatcher.c:23:6:MotorDispatcher_Send	14
+../Core/Src/motor_dispatcher.c:79:6:MotorDispatcher_SendAll	2
+../Core/Src/motor_dispatcher.c:87:6:MotorDispatcher_SendRaw	6
+../Core/Src/motor_dispatcher.c:119:13:FlipRawDirection	10
+../Core/Src/motor_dispatcher.c:150:6:MotorDispatcher_SendRawToMotor	9
+../Core/Src/motor_dispatcher.c:176:6:MotorDispatcher_SendTunePayload	12
+../Core/Src/motor_dispatcher.c:232:14:MotorDispatcher_GetLink	2
+../Core/Src/motor_dispatcher.c:240:6:MotorDispatcher_Update	2

@@ -1402,7 +1402,7 @@ class EarendilControlGui(QMainWindow):
         self.setMinimumSize(1100, 650)
 
         # -- State ----------------------------------------------------------
-        self.current_theme = "dark"            # "dark" or "light"
+        self.current_theme = "light"            # "dark" or "light"
 
         self.ser: serial.Serial | None = None
         self.reader_thread: SerialReaderThread | None = None
@@ -1624,7 +1624,7 @@ class EarendilControlGui(QMainWindow):
 
         # Theme toggle button - only changes visual theme, never sends a
         # serial command.  Text reflects the theme we will switch TO.
-        self._btn_theme = QPushButton("Light Mode")
+        self._btn_theme = QPushButton("Dark Mode")
         self._btn_theme.setFixedWidth(100)
         self._btn_theme.clicked.connect(self._toggle_theme)
         lay.addWidget(self._btn_theme)
@@ -2271,8 +2271,12 @@ class EarendilControlGui(QMainWindow):
         """Re-style the Turn Ratio spinbox for the active theme."""
         c = self._colors()
         color = c['accent_gold_bright']
+        bg = c['bg_input']
+        border = c['border']
         self._spin_turn_ratio.setStyleSheet(
-            f"QDoubleSpinBox {{ color: {color}; font-size: 18px; font-weight: bold; }}"
+            f"QDoubleSpinBox {{ color: {color}; background-color: {bg}; "
+            f"border: 1px solid {border}; border-radius: 4px; "
+            f"padding: 4px 8px; font-size: 18px; font-weight: bold; }}"
         )
 
     def _style_operating_mode_status(self, cfg: dict):

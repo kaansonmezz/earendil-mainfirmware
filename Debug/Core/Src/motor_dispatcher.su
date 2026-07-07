@@ -1,9 +1,9 @@
 ../Core/Src/motor_dispatcher.c:15:6:MotorDispatcher_Init	16	static
 ../Core/Src/motor_dispatcher.c:23:6:MotorDispatcher_Send	48	static
-../Core/Src/motor_dispatcher.c:75:6:MotorDispatcher_SendAll	24	static
-../Core/Src/motor_dispatcher.c:83:6:MotorDispatcher_SendRaw	120	static
-../Core/Src/motor_dispatcher.c:115:13:FlipRawDirection	32	static
-../Core/Src/motor_dispatcher.c:146:6:MotorDispatcher_SendRawToMotor	160	static
-../Core/Src/motor_dispatcher.c:172:6:MotorDispatcher_SendTunePayload	128	static
-../Core/Src/motor_dispatcher.c:228:14:MotorDispatcher_GetLink	16	static
-../Core/Src/motor_dispatcher.c:236:6:MotorDispatcher_Update	16	static
+../Core/Src/motor_dispatcher.c:79:6:MotorDispatcher_SendAll	24	static
+../Core/Src/motor_dispatcher.c:87:6:MotorDispatcher_SendRaw	120	static
+../Core/Src/motor_dispatcher.c:119:13:FlipRawDirection	32	static
+../Core/Src/motor_dispatcher.c:150:6:MotorDispatcher_SendRawToMotor	160	static
+../Core/Src/motor_dispatcher.c:176:6:MotorDispatcher_SendTunePayload	128	static
+../Core/Src/motor_dispatcher.c:232:14:MotorDispatcher_GetLink	16	static
+../Core/Src/motor_dispatcher.c:240:6:MotorDispatcher_Update	16	static
