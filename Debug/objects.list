@@ -8,6 +8,7 @@
 "./Core/Src/logger.o"
 "./Core/Src/mag_qmc5883p.o"
 "./Core/Src/main.o"
+"./Core/Src/manipulation_uart_dma.o"
 "./Core/Src/motion_controller.o"
 "./Core/Src/motor_dispatcher.o"
 "./Core/Src/motor_link.o"

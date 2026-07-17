@@ -14,8 +14,10 @@
 #include "motor_uart_dma.h"
 #include "motor_tx_dma.h"
 #include "motor_tuning_config.h"
+#include "manipulation_uart_dma.h"
 #include "i2c_scanner.h"
 #include "imu_mpu9250.h"
+#include "mag_qmc5883p.h"
 #include "stm32h7xx_hal.h"
 
 /* ── Private state ────────────────────────────────────────────────────────── */
@@ -30,6 +32,14 @@ void App_Init(void)
 {
     Logger_Init();
     I2C_ScanBus();
+
+    /* Auto-init magnetometer (QMC5883L) at startup */
+    {
+        extern I2C_HandleTypeDef hi2c1;
+        static MAG_QMC5883P_Handle_t mag_handle = {0};
+        MAG_QMC5883P_Init(&hi2c1, &mag_handle);
+    }
+
     TerminalIf_Init();
 
     ControlMode_Init();
@@ -44,6 +54,9 @@ void App_Init(void)
 
     MotorUartDma_Init();
     MotorUartDma_StartAllRx();
+
+    ManipulationUartDma_Init();
+    ManipulationUartDma_StartRx();
 
     Logger_Log(LOG_BOOT, "H723 rover main controller started");
     Logger_Log(LOG_BOOT, "Operating mode: DISARM (motion locked)");
@@ -62,10 +75,12 @@ void App_Update(void)
     {
         processed++;
 
-        Logger_Log(LOG_INFO, "CMD: %s", s_termLine);
-
         if (TerminalParser_Parse(s_termLine, &s_parsedCmd))
         {
+            /* Suppress CMD log for heartbeat — keep the serial link quiet. */
+            if (s_parsedCmd.type != TCMD_HB)
+                Logger_Log(LOG_INFO, "CMD: %s", s_termLine);
+
             CommandHandler_Handle(&s_parsedCmd);
         }
         else
@@ -79,6 +94,7 @@ void App_Update(void)
     AckManager_Update();
     SafetyManager_Update();
     MotorUartDma_Update();
+    ManipulationUartDma_Update();
 
     /* ── Periodic IMU stream (non-blocking) ───────────────────────── */
     IMU_StreamTask();

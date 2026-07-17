@@ -4,6 +4,7 @@
 #include "motion_controller.h"
 #include "motor_dispatcher.h"
 #include "motor_tx_dma.h"
+#include "operating_mode.h"
 
 /* ── Private variables ──────────────────────────────────────────────────── */
 /* volatile: written from SafetyManager_NotifyRx() (RX callback/ISR context),
@@ -11,6 +12,17 @@
 static volatile uint32_t lastRxTick[MOTOR_COUNT];
 static volatile bool     linkLost[MOTOR_COUNT];
 static volatile bool     recoveryPending[MOTOR_COUNT];
+
+/* ── PC/Pi control-link watchdog state ────────────────────────────────────
+ *  Updated from main-loop context only (command_handler calls
+ *  SafetyManager_NotifyPcActivity()).  The periodic check runs in
+ *  SafetyManager_Update() which is also main-loop context, so no
+ *  volatile qualifier is required for these variables. */
+static uint32_t pcLastActivityMs;
+static bool     pcLinkSeen;
+static bool     pcLinkAlive;
+static bool     pcLinkTimeoutLatched;
+static bool     pcRecoveryPending;
 
 /* ── Private helpers ─────────────────────────────────────────────────────── */
 
@@ -36,6 +48,13 @@ void SafetyManager_Init(void)
         linkLost[i]       = false;
         recoveryPending[i] = false;
     }
+
+    /* PC/Pi control-link watchdog */
+    pcLastActivityMs     = 0U;
+    pcLinkSeen           = false;
+    pcLinkAlive          = false;
+    pcLinkTimeoutLatched = false;
+    pcRecoveryPending    = false;
 }
 
 void SafetyManager_Update(void)
@@ -69,6 +88,33 @@ void SafetyManager_Update(void)
             Logger_Log(LOG_INFO, "[LINK_RECOVERED][%s] link reestablished",
                        GetMotorName((MotorId_t)i));
         }
+    }
+
+    /* ── PC/Pi control-link watchdog ──────────────────────────────────────
+     *  Only fires once per timeout transition (latch prevents repeat). */
+    if (pcLinkSeen && pcLinkAlive && !pcLinkTimeoutLatched)
+    {
+        if ((uint32_t)(now - pcLastActivityMs) >= PC_LINK_TIMEOUT_MS)
+        {
+            /* One-shot timeout transition — safety actions first, then log. */
+            pcLinkTimeoutLatched = true;
+            pcLinkAlive = false;
+
+            /* Central stop-all + force DISARM (before logging) */
+            SafetyManager_EnterDisarm();
+            OperatingMode_Set(ROVER_MODE_DISARM);
+
+            Logger_Log(LOG_ERROR,
+                       "[PC_LINK] TIMEOUT,AGE_MS:%lu,ACTION:STOP_DISARM",
+                       (unsigned long)(now - pcLastActivityMs));
+        }
+    }
+
+    /* ── Deferred PC-link recovery log (main-loop context) ────────────── */
+    if (pcRecoveryPending)
+    {
+        pcRecoveryPending = false;
+        Logger_Log(LOG_INFO, "[PC_LINK] RECOVERED");
     }
 }
 
@@ -123,4 +169,42 @@ void SafetyManager_LeaveDisarm(void)
      * move.  Nothing is sent on the UARTs here — motors are already stopped. */
     MotorTxDma_CancelPending();
     MotionController_DisarmSafe();
+}
+
+/* ── PC/Pi control-link watchdog public API ──────────────────────────────── */
+
+void SafetyManager_NotifyPcActivity(void)
+{
+    uint32_t now = HAL_GetTick();
+
+    /* If recovering from a timeout, flag the recovery log */
+    if (pcLinkTimeoutLatched || (pcLinkSeen && !pcLinkAlive))
+        pcRecoveryPending = true;
+
+    pcLastActivityMs     = now;
+    pcLinkSeen           = true;
+    pcLinkAlive          = true;
+    pcLinkTimeoutLatched = false;
+}
+
+bool SafetyManager_IsPcLinkAlive(void)
+{
+    return pcLinkAlive;
+}
+
+bool SafetyManager_IsPcLinkSeen(void)
+{
+    return pcLinkSeen;
+}
+
+bool SafetyManager_IsPcLinkTimeout(void)
+{
+    return pcLinkTimeoutLatched;
+}
+
+uint32_t SafetyManager_PcLinkAgeMs(void)
+{
+    if (pcLastActivityMs == 0U)
+        return 0xFFFFFFFFU;  /* never received */
+    return (uint32_t)(HAL_GetTick() - pcLastActivityMs);
 }

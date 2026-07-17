@@ -465,6 +465,45 @@ bool TerminalParser_Parse(const char *line, TerminalCommand_t *outResult)
     while (len > 0 && isspace((unsigned char)buf[len - 1]))
         buf[--len] = '\0';
 
+    /* ── Early branch: arm <payload> ────────────────────────────────────
+     * Must be parsed BEFORE the lowercase loop below so that the payload
+     * case is preserved exactly as typed.  The "arm" prefix itself is
+     * matched case-insensitively. */
+    if (len >= 3 &&
+        tolower((unsigned char)buf[0]) == 'a' &&
+        tolower((unsigned char)buf[1]) == 'r' &&
+        tolower((unsigned char)buf[2]) == 'm')
+    {
+        if (len == 3)
+        {
+            /* bare "arm" — no payload */
+            outResult->type = TCMD_ARM_RAW;
+            outResult->armPayload[0] = '\0';
+            return true;
+        }
+        if (buf[3] == ' ')
+        {
+            const char *payload = buf + 4;
+            while (*payload == ' ')
+                payload++;
+            size_t plen = strlen(payload);
+            if (plen == 0)
+            {
+                /* "arm " with only whitespace — no payload */
+                outResult->type = TCMD_ARM_RAW;
+                outResult->armPayload[0] = '\0';
+                return true;
+            }
+            if (plen < sizeof(outResult->armPayload))
+            {
+                outResult->type = TCMD_ARM_RAW;
+                memcpy(outResult->armPayload, payload, plen + 1);
+                return true;
+            }
+            /* payload too long: fall through to unknown */
+        }
+    }
+
     for (size_t i = 0; i < len; i++)
         buf[i] = (char)tolower((unsigned char)buf[i]);
 
@@ -502,6 +541,20 @@ bool TerminalParser_Parse(const char *line, TerminalCommand_t *outResult)
     if (strcmp(buf, "status") == 0)
     {
         outResult->type = TCMD_STATUS;
+        return true;
+    }
+
+    /* ── 5a. hb / heartbeat (PC control-link keepalive) ─────────────── */
+    if (strcmp(buf, "hb") == 0 || strcmp(buf, "heartbeat") == 0)
+    {
+        outResult->type = TCMD_HB;
+        return true;
+    }
+
+    /* ── 5a2. linkstat (diagnostic control-link status) ──────────────── */
+    if (strcmp(buf, "linkstat") == 0)
+    {
+        outResult->type = TCMD_LINKSTAT;
         return true;
     }
 

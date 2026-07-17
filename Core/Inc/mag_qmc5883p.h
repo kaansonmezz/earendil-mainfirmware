@@ -4,23 +4,23 @@
 #include "stm32h7xx_hal.h"
 
 /* ── I2C address ─────────────────────────────────────────────────────────── */
-#define MAG_QMC5883P_ADDR7              0x2CU
-#define MAG_QMC5883P_DEVADDR_HAL        (MAG_QMC5883P_ADDR7 << 1)  /* 0x58 */
+#define MAG_QMC5883P_ADDR7              0x0DU
+#define MAG_QMC5883P_DEVADDR_HAL        (MAG_QMC5883P_ADDR7 << 1)  /* 0x1A */
 
-/* ── Register map ────────────────────────────────────────────────────────── */
-#define MAG_QMC5883P_REG_CHIP_ID        0x00U
-#define MAG_QMC5883P_REG_X_LSB          0x01U
-#define MAG_QMC5883P_REG_X_MSB          0x02U
-#define MAG_QMC5883P_REG_Y_LSB          0x03U
-#define MAG_QMC5883P_REG_Y_MSB          0x04U
-#define MAG_QMC5883P_REG_Z_LSB          0x05U
-#define MAG_QMC5883P_REG_Z_MSB          0x06U
-#define MAG_QMC5883P_REG_STATUS         0x09U
-#define MAG_QMC5883P_REG_CTRL1          0x0AU
-#define MAG_QMC5883P_REG_CTRL2          0x0BU
-#define MAG_QMC5883P_REG_AXIS_SIGN      0x29U
+/* ── Register map (QMC5883L) ─────────────────────────────────────────────── */
+#define MAG_QMC5883P_REG_CHIP_ID        0x0DU
+#define MAG_QMC5883P_REG_X_LSB          0x00U
+#define MAG_QMC5883P_REG_X_MSB          0x01U
+#define MAG_QMC5883P_REG_Y_LSB          0x02U
+#define MAG_QMC5883P_REG_Y_MSB          0x03U
+#define MAG_QMC5883P_REG_Z_LSB          0x04U
+#define MAG_QMC5883P_REG_Z_MSB          0x05U
+#define MAG_QMC5883P_REG_STATUS         0x06U
+#define MAG_QMC5883P_REG_CTRL1          0x09U
+#define MAG_QMC5883P_REG_CTRL2          0x0AU
+#define MAG_QMC5883P_REG_SET_RESET      0x0BU
 
-#define MAG_QMC5883P_CHIP_ID_EXPECTED   0x80U
+#define MAG_QMC5883P_CHIP_ID_EXPECTED   0xFFU
 
 /* ── Status register bits ────────────────────────────────────────────────── */
 #define MAG_QMC5883P_STATUS_DRDY        (1U << 0)
@@ -50,11 +50,11 @@ typedef struct
 /* Low-level register read (polling I2C). */
 HAL_StatusTypeDef MAG_QMC5883P_ReadReg(I2C_HandleTypeDef *hi2c, uint8_t reg, uint8_t *value);
 
-/* Probe address 0x2C and read chip ID register 0x00.
+/* Probe address 0x0D and read chip ID register 0x0D.
  * Populates handle on success. Does not write any registers. */
 HAL_StatusTypeDef MAG_QMC5883P_Detect(I2C_HandleTypeDef *hi2c, MAG_QMC5883P_Handle_t *mag);
 
-/* Initialize QMC5883P: axis sign, control registers.
+/* Initialize QMC5883L: set/reset period, control registers.
  * Calls detect internally if not already found. */
 HAL_StatusTypeDef MAG_QMC5883P_Init(I2C_HandleTypeDef *hi2c, MAG_QMC5883P_Handle_t *mag);
 

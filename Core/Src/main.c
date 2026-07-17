@@ -213,8 +213,14 @@ static void MX_I2C1_Init(void)
   /* USER CODE BEGIN I2C1_Init 1 */
 
   /* USER CODE END I2C1_Init 1 */
+
+  /* Reset I2C peripheral to clear any stuck bus state */
+  __HAL_RCC_I2C1_FORCE_RESET();
+  HAL_Delay(1);
+  __HAL_RCC_I2C1_RELEASE_RESET();
+
   hi2c1.Instance = I2C1;
-  hi2c1.Init.Timing = 0x20A0ACFE;
+  hi2c1.Init.Timing = 0x0C423232;
   hi2c1.Init.OwnAddress1 = 0;
   hi2c1.Init.AddressingMode = I2C_ADDRESSINGMODE_7BIT;
   hi2c1.Init.DualAddressMode = I2C_DUALADDRESS_DISABLE;

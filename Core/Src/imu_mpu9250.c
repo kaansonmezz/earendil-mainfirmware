@@ -1331,13 +1331,13 @@ void IMU_StreamTask(void)
                    IMU_MPU9250_BiasIsEnabled(), IMU_MPU9250_BiasGetSource(),
                    imu_gyro_filter_enabled,
                    (long)imu_gyro_deadband_mdps, (long)imu_gyro_lpf_alpha_permille);
-
-        /* Also print magnetometer telemetry if available */
-        static MAG_QMC5883P_Handle_t mag_handle = {0};
-        MAG_QMC5883P_ReadImu(&hi2c1, &mag_handle);
     }
     else
     {
         Logger_Log(LOG_INFO, "MPU_IMU,OK:0");
     }
+
+    /* Print magnetometer telemetry regardless of MPU status */
+    static MAG_QMC5883P_Handle_t mag_handle = {0};
+    MAG_QMC5883P_ReadImu(&hi2c1, &mag_handle);
 }

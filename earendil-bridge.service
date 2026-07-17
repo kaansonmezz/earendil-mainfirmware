@@ -1,0 +1,25 @@
+[Unit]
+Description=Earendil TCP to STM32H723 Serial Bridge
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+# --- Replace ALL placeholders below before deploying to the Raspberry Pi ---
+# User=             Pi username (e.g. garth)
+# WorkingDirectory= directory containing tcp_uart_bridge.py
+# ExecStart=        Python path, bridge path, serial by-id path, control-PC IP
+#
+# The --serial-device value is REQUIRED and must be a real device path.
+# The bridge will refuse to start if a placeholder is detected.
+#
+User=garth
+WorkingDirectory=/home/garth/H7-DMA
+ExecStart=/usr/bin/python3 /home/garth/H7-DMA/tcp_uart_bridge.py --host 0.0.0.0 --port 5000 --serial-device /dev/serial/by-id/REPLACE_WITH_ACTUAL_H7_DEVICE --baud 115200 --allow-client 192.168.50.10/32 --log-level INFO
+Restart=always
+RestartSec=1
+TimeoutStopSec=5
+KillSignal=SIGTERM
+
+[Install]
+WantedBy=multi-user.target

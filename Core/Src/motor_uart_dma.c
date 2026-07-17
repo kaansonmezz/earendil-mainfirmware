@@ -1,5 +1,6 @@
 #include "motor_uart_dma.h"
 #include "motor_tx_dma.h"
+#include "manipulation_uart_dma.h"
 #include "safety_manager.h"
 #include "motor_tuning_config.h"
 #include "logger.h"
@@ -24,11 +25,11 @@ typedef struct
 
 static MotorRxLineQueue_t lineQueue[NUM_MOTOR_UARTS];
 
-/* Complete-line ring buffer (written in ISR, read in main loop).
- * ISR increments linesReady; main loop drains it to zero. */
+/* Complete-line SPSC FIFO (ISR producer, main-loop consumer). */
 static char     lineBuf[NUM_MOTOR_UARTS][MOTOR_RX_QUEUE_DEPTH][MOTOR_RX_LINE_MAX + 1];
-static uint8_t  lineHead[NUM_MOTOR_UARTS];
-static volatile uint8_t linesReady[NUM_MOTOR_UARTS];
+static volatile uint8_t lineHead[NUM_MOTOR_UARTS];
+static volatile uint8_t lineTail[NUM_MOTOR_UARTS];
+static volatile uint8_t lineCount[NUM_MOTOR_UARTS];
 
 static const char *slotLabel[] = { "USART2_RX", "UART4_RX", "UART5_RX", "UART7_RX" };
 
@@ -85,6 +86,33 @@ static bool GetMotorIdFromUart(UART_HandleTypeDef *huart, MotorId_t *motor)
     if (huart->Instance == UART5)  { *motor = MOTOR_RR; return true; }
 
     return false;
+}
+
+/* Pop exactly one complete record.  The copy and metadata update are kept in
+ * one short critical section; all parsing and logging happens afterward with
+ * interrupts enabled. */
+static bool MotorRxQueuePop(uint8_t uartIndex,
+                            char out[MOTOR_RX_LINE_MAX + 1])
+{
+    if (uartIndex >= NUM_MOTOR_UARTS || out == NULL)
+        return false;
+
+    uint32_t primask = __get_PRIMASK();
+    __disable_irq();
+
+    if (lineCount[uartIndex] == 0U)
+    {
+        if (!primask) __enable_irq();
+        return false;
+    }
+
+    uint8_t slot = lineHead[uartIndex];
+    memcpy(out, lineBuf[uartIndex][slot], MOTOR_RX_LINE_MAX + 1U);
+    lineHead[uartIndex] = (uint8_t)((slot + 1U) % MOTOR_RX_QUEUE_DEPTH);
+    lineCount[uartIndex]--;
+
+    if (!primask) __enable_irq();
+    return true;
 }
 
 /* ── Error report (main-loop context only) ─────────────────────────────── */
@@ -179,8 +207,9 @@ void MotorUartDma_Init(void)
     memset(uart5_rx_dma_buffer, 0, sizeof(uart5_rx_dma_buffer));
     memset(uart7_rx_dma_buffer, 0, sizeof(uart7_rx_dma_buffer));
     memset(lineQueue, 0, sizeof(lineQueue));
-    memset(lineHead, 0, sizeof(lineHead));
-    memset((void *)linesReady, 0, sizeof(linesReady));
+    memset((void *)lineHead, 0, sizeof(lineHead));
+    memset((void *)lineTail, 0, sizeof(lineTail));
+    memset((void *)lineCount, 0, sizeof(lineCount));
 
     for (int i = 0; i < NUM_MOTOR_UARTS; i++)
     {
@@ -245,16 +274,9 @@ void MotorUartDma_Update(void)
     /* Drain queued complete lines from each UART */
     for (int i = 0; i < NUM_MOTOR_UARTS; i++)
     {
-        uint8_t count = linesReady[i];
-        if (count == 0)
-            continue;
-
-        uint8_t rdIdx = 0;
-
-        for (uint8_t n = 0; n < count; n++)
+        char line[MOTOR_RX_LINE_MAX + 1];
+        while (MotorRxQueuePop((uint8_t)i, line))
         {
-            const char *line = lineBuf[i][rdIdx];
-
             /* Detect compact F411 telemetry.  The payload must START with
              * "RPM:" to be classified as telemetry.  Lines like
              * "[ERR] Unknown commandRPM:0,..." must NOT be classified as
@@ -276,17 +298,7 @@ void MotorUartDma_Update(void)
              * caches Kp_m/Ki_m, Base, and Boost payloads. */
             MotorTuningConfig_ProcessLine(
                 MotorTuningConfig_SlotToMotorId(i), line);
-
-            rdIdx++;
-            if (rdIdx >= MOTOR_RX_QUEUE_DEPTH)
-                rdIdx = 0;
         }
-
-        /* Reset queue head and ready count after draining.
-         * linesReady is uint8_t so this is effectively atomic on Cortex-M
-         * for values <= 255, which is well within our queue depth of 8. */
-        linesReady[i] = 0;
-        lineHead[i]   = 0;
     }
 }
 
@@ -294,6 +306,9 @@ void MotorUartDma_Update(void)
 
 void HAL_UARTEx_RxEventCallback(UART_HandleTypeDef *huart, uint16_t Size)
 {
+    if (ManipulationUartDma_HandleRxEvent(huart, Size))
+        return;
+
     int idx = LookupSlot(huart);
     if (idx < 0)
         return;
@@ -320,13 +335,12 @@ void HAL_UARTEx_RxEventCallback(UART_HandleTypeDef *huart, uint16_t Size)
             {
                 q->line[q->len] = '\0';
 
-                if (linesReady[idx] < MOTOR_RX_QUEUE_DEPTH)
+                if (lineCount[idx] < MOTOR_RX_QUEUE_DEPTH)
                 {
-                    uint8_t wrSlot = lineHead[idx] + linesReady[idx];
-                    if (wrSlot >= MOTOR_RX_QUEUE_DEPTH)
-                        wrSlot -= MOTOR_RX_QUEUE_DEPTH;
+                    uint8_t wrSlot = lineTail[idx];
                     memcpy(lineBuf[idx][wrSlot], q->line, q->len + 1);
-                    linesReady[idx]++;
+                    lineTail[idx] = (uint8_t)((wrSlot + 1U) % MOTOR_RX_QUEUE_DEPTH);
+                    lineCount[idx]++;
                 }
                 else
                 {
@@ -371,6 +385,9 @@ void HAL_UARTEx_RxEventCallback(UART_HandleTypeDef *huart, uint16_t Size)
 
 void HAL_UART_ErrorCallback(UART_HandleTypeDef *huart)
 {
+    if (ManipulationUartDma_HandleError(huart))
+        return;
+
     int idx = LookupSlot(huart);
     if (idx < 0)
         return;

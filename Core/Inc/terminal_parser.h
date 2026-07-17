@@ -92,7 +92,10 @@ typedef enum
     TCMD_MAGHELP,               /* maghelp : show magnetometer commands */
     TCMD_DRIVE_ARC,             /* drive <rpm|duty> <target> <fl|fr|bl|br> tr <decimal> */
     TCMD_CFGCACHE,              /* cfgcache [FL|FR|RL|RR] : print cached tuning config */
-    TCMD_CFGREAD                /* cfgread FL|FR|RL|RR|all : request cfg from motor(s) */
+    TCMD_CFGREAD,               /* cfgread FL|FR|RL|RR|all : request cfg from motor(s) */
+    TCMD_ARM_RAW,               /* arm <payload> : raw text to manipulation F411 */
+    TCMD_HB,                    /* hb / heartbeat : PC control-link keepalive */
+    TCMD_LINKSTAT               /* linkstat : diagnostic control-link status */
 } TerminalCommandType_t;
 
 /* ── Parse result ────────────────────────────────────────────────────────── */
@@ -137,6 +140,12 @@ typedef struct
     /* TCMD_CFGCACHE / TCMD_CFGREAD: target motor.
      * MOTOR_COUNT means "all motors" (bare cfgcache / cfgread all). */
     MotorId_t         cfgMotor;
+
+    /* TCMD_ARM_RAW: raw payload to forward to manipulation F411 over UART8.
+     * armPayload[0] == '\0' means bare "arm" with no payload — handler must
+     * emit a usage error.  The payload never includes the "arm " prefix nor
+     * any trailing CR/LF.  Case is preserved exactly as typed. */
+    char              armPayload[RAW_PAYLOAD_MAX];
 } TerminalCommand_t;
 
 /* ── Public API ─────────────────────────────────────────────────────────── */

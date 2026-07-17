@@ -35,7 +35,8 @@ Core/Src/safety_manager.o: ../Core/Src/safety_manager.c \
  ../Core/Inc/logger.h ../Core/Inc/motion_controller.h \
  ../Core/Inc/terminal_parser.h ../Core/Inc/motor_dispatcher.h \
  ../Core/Inc/motor_link.h ../Core/Inc/app_config.h \
- ../Core/Inc/motor_tx_dma.h ../Core/Inc/main.h
+ ../Core/Inc/motor_tx_dma.h ../Core/Inc/main.h \
+ ../Core/Inc/operating_mode.h
 ../Core/Inc/safety_manager.h:
 ../Core/Inc/rover_types.h:
 ../Core/Inc/app_config.h:
@@ -78,3 +79,4 @@ Core/Src/safety_manager.o: ../Core/Src/safety_manager.c \
 ../Core/Inc/app_config.h:
 ../Core/Inc/motor_tx_dma.h:
 ../Core/Inc/main.h:
+../Core/Inc/operating_mode.h:

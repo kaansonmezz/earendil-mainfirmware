@@ -1,4 +1,5 @@
 #include "motor_tx_dma.h"
+#include "manipulation_uart_dma.h"
 #include "app_config.h"
 #include "logger.h"
 #include <string.h>
@@ -420,4 +421,5 @@ uint8_t MotorTxDma_GetQueueMaxDepth(MotorId_t motor)
 void HAL_UART_TxCpltCallback(UART_HandleTypeDef *huart)
 {
     MotorTxDma_OnTxComplete(huart);
+    ManipulationUartDma_OnTxComplete(huart);
 }

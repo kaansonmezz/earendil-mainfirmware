@@ -113,18 +113,18 @@ HAL_StatusTypeDef MAG_QMC5883P_Init(I2C_HandleTypeDef *hi2c, MAG_QMC5883P_Handle
 
     HAL_StatusTypeDef st;
 
-    /* Define sign for X/Y/Z axes */
-    st = Mag_WriteReg(hi2c, MAG_QMC5883P_ADDR7, MAG_QMC5883P_REG_AXIS_SIGN, 0x06);
+    /* Set/Reset period register (recommended 0x01 for QMC5883L) */
+    st = Mag_WriteReg(hi2c, MAG_QMC5883P_ADDR7, MAG_QMC5883P_REG_SET_RESET, 0x01);
     if (st != HAL_OK)
         return st;
 
-    /* Set/Reset mode ON, field range 8 Gauss */
-    st = Mag_WriteReg(hi2c, MAG_QMC5883P_ADDR7, MAG_QMC5883P_REG_CTRL2, 0x08);
+    /* CTRL2: default (0x00) */
+    st = Mag_WriteReg(hi2c, MAG_QMC5883P_ADDR7, MAG_QMC5883P_REG_CTRL2, 0x00);
     if (st != HAL_OK)
         return st;
 
-    /* Continuous mode, 200Hz ODR, 512 OSR */
-    st = Mag_WriteReg(hi2c, MAG_QMC5883P_ADDR7, MAG_QMC5883P_REG_CTRL1, 0xC3);
+    /* CTRL1: Continuous mode, 200Hz ODR, 512 OSR, 8G range */
+    st = Mag_WriteReg(hi2c, MAG_QMC5883P_ADDR7, MAG_QMC5883P_REG_CTRL1, 0xC5);
     if (st != HAL_OK)
         return st;
 

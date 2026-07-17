@@ -8,6 +8,7 @@
 #include "safety_manager.h"
 #include "terminal_if.h"
 #include "motor_tuning_config.h"
+#include "manipulation_uart_dma.h"
 #include "logger.h"
 #include "i2c_scanner.h"
 #include "imu_mpu9250.h"
@@ -234,6 +235,8 @@ void CommandHandler_PrintHelp(void)
     Logger_Log(LOG_INFO, "  brake            Send brake command: x");
     Logger_Log(LOG_INFO, "  identify         Arm motors, then send identify to all motor UARTs");
     Logger_Log(LOG_INFO, "  status           Send status to all motor UARTs");
+    Logger_Log(LOG_INFO, "  hb               Heartbeat / control-link keepalive (silent)");
+    Logger_Log(LOG_INFO, "  linkstat         Diagnostic control-link status");
     Logger_Log(LOG_INFO, "  termstat         Terminal RX queue diagnostics");
     Logger_Log(LOG_INFO, "  i2cscan          Scan I2C1 bus for devices");
     Logger_Log(LOG_INFO, "  mpuwho           Read MPU9250 WHO_AM_I register");
@@ -277,6 +280,12 @@ void CommandHandler_PrintHelp(void)
     Logger_Log(LOG_INFO, "  RL f100");
     Logger_Log(LOG_INFO, "  RR mode speed");
     Logger_Log(LOG_INFO, "");
+    Logger_Log(LOG_INFO, "Manipulation arm command:");
+    Logger_Log(LOG_INFO, "  arm <payload>    Send raw payload to manipulation F411 over UART8");
+    Logger_Log(LOG_INFO, "Examples:");
+    Logger_Log(LOG_INFO, "  arm forward 1 200");
+    Logger_Log(LOG_INFO, "  arm set 1 stopmode brake");
+    Logger_Log(LOG_INFO, "");
     Logger_Log(LOG_INFO, "Motor tuning:");
     Logger_Log(LOG_INFO, "  FL base P1 P2 P3 P4 P5 P6 P7 P8");
     Logger_Log(LOG_INFO, "  FL boost P1 P2 P3 P4 P5 P6 P7 P8 MS");
@@ -314,6 +323,8 @@ void CommandHandler_Handle(const TerminalCommand_t *cmd)
         switch (cmd->type)
         {
             case TCMD_OP_MODE:      /* mode disarm/manual/auto/autonomous */
+            case TCMD_STOP:         /* stop — always safe, even in DISARM */
+            case TCMD_BRAKE:        /* brake — always safe, even in DISARM */
             case TCMD_HELP:         /* help */
             case TCMD_STATUS:       /* status (query) */
             case TCMD_TERMSTAT:     /* termstat (query) */
@@ -347,6 +358,8 @@ void CommandHandler_Handle(const TerminalCommand_t *cmd)
             case TCMD_MAGHELP:               /* maghelp (query) */
             case TCMD_CFGCACHE:              /* cfgcache (query) */
             case TCMD_CFGREAD:               /* cfgread (query) */
+            case TCMD_HB:                    /* hb/heartbeat (keepalive) */
+            case TCMD_LINKSTAT:              /* linkstat (diagnostic) */
                 allowed = true;
                 break;
 
@@ -385,6 +398,72 @@ void CommandHandler_Handle(const TerminalCommand_t *cmd)
             Logger_Log(LOG_WARN, "[DISARM] Command ignored. Change mode first.");
             return;
         }
+    }
+
+    /* ── Heartbeat: lightweight keepalive — no log, no ACK, no motor TX ── */
+    if (cmd->type == TCMD_HB)
+    {
+        SafetyManager_NotifyPcActivity();
+        return;
+    }
+
+    /* ── Linkstat: diagnostic one-liner ──────────────────────────────── */
+    if (cmd->type == TCMD_LINKSTAT)
+    {
+        uint32_t age = SafetyManager_PcLinkAgeMs();
+        Logger_Log(LOG_INFO,
+                   "PC_LINK,SEEN:%u,ALIVE:%u,TIMEOUT:%u,AGE_MS:%lu,LIMIT_MS:%lu",
+                   SafetyManager_IsPcLinkSeen()  ? 1U : 0U,
+                   SafetyManager_IsPcLinkAlive() ? 1U : 0U,
+                   SafetyManager_IsPcLinkTimeout() ? 1U : 0U,
+                   (unsigned long)age,
+                   (unsigned long)PC_LINK_TIMEOUT_MS);
+        return;
+    }
+
+    /* ── PC-link motion gate ─────────────────────────────────────────────
+     *  Motion and arc-turn commands are rejected when the PC link has
+     *  timed out or has never been established.  stop/brake/mode/status
+     *  and all diagnostic/query commands pass through unconditionally. */
+    if (cmd->type == TCMD_MOTION || cmd->type == TCMD_DRIVE_ARC)
+    {
+        if (!SafetyManager_IsPcLinkAlive())
+        {
+            Logger_Log(LOG_ERROR,
+                       "[PC_LINK] Motion rejected: control link unavailable");
+            return;
+        }
+    }
+
+    /* ── PC-link mode gate ──────────────────────────────────────────────
+     *  MANUAL and AUTONOMOUS require an active PC link.  DISARM is always
+     *  accepted regardless of link state.  This prevents a stale mode
+     *  command from reviving a dead link and enabling motion. */
+    if (cmd->type == TCMD_OP_MODE)
+    {
+        if (cmd->opMode != ROVER_MODE_DISARM && !SafetyManager_IsPcLinkAlive())
+        {
+            Logger_Log(LOG_ERROR,
+                       "[PC_LINK] Mode rejected: control link unavailable");
+            return;
+        }
+    }
+
+    /* ── Refresh PC-link activity on accepted control commands ──────────
+     *  Only actual control actions refresh the watchdog.  Diagnostics,
+     *  queries, IMU commands, motor config reads, and telemetry commands
+     *  do NOT keep the control-link watchdog alive. */
+    switch (cmd->type)
+    {
+        case TCMD_MOTION:
+        case TCMD_DRIVE_ARC:
+        case TCMD_STOP:
+        case TCMD_BRAKE:
+        case TCMD_OP_MODE:
+            SafetyManager_NotifyPcActivity();
+            break;
+        default:
+            break;
     }
 
     switch (cmd->type)
@@ -756,16 +835,16 @@ void CommandHandler_Handle(const TerminalCommand_t *cmd)
             HAL_StatusTypeDef st = MAG_QMC5883P_Init(&hi2c1, &mag_handle);
             if (st == HAL_OK && mag_handle.initialized)
             {
-                uint8_t r29 = 0, ctrl2 = 0, ctrl1 = 0;
-                MAG_QMC5883P_ReadReg(&hi2c1, MAG_QMC5883P_REG_AXIS_SIGN, &r29);
+                uint8_t sr = 0, ctrl2 = 0, ctrl1 = 0;
+                MAG_QMC5883P_ReadReg(&hi2c1, MAG_QMC5883P_REG_SET_RESET, &sr);
                 MAG_QMC5883P_ReadReg(&hi2c1, MAG_QMC5883P_REG_CTRL2, &ctrl2);
                 MAG_QMC5883P_ReadReg(&hi2c1, MAG_QMC5883P_REG_CTRL1, &ctrl1);
                 Logger_Log(LOG_INFO,
-                           "MAG_INIT,CHIP:QMC5883P,ADDR:0x%02X,CHIP_ID:0x%02X,"
-                           "REG29:0x%02X,CTRL2:0x%02X,CTRL1:0x%02X,OK:1",
+                           "MAG_INIT,CHIP:QMC5883L,ADDR:0x%02X,CHIP_ID:0x%02X,"
+                           "SETRST:0x%02X,CTRL2:0x%02X,CTRL1:0x%02X,OK:1",
                            (unsigned)mag_handle.addr7,
                            (unsigned)mag_handle.chip_id,
-                           (unsigned)r29, (unsigned)ctrl2, (unsigned)ctrl1);
+                           (unsigned)sr, (unsigned)ctrl2, (unsigned)ctrl1);
             }
             else
             {
@@ -888,6 +967,20 @@ void CommandHandler_Handle(const TerminalCommand_t *cmd)
                 MotorDispatcher_SendRawToMotor(cmd->cfgMotor, "cfg");
                 Logger_Log(LOG_INFO, "[CFGREAD] sent cfg to %s", tag);
             }
+            break;
+        }
+
+        case TCMD_ARM_RAW:
+        {
+            if (cmd->armPayload[0] == '\0')
+            {
+                Logger_Log(LOG_ERROR, "Usage: arm <payload>");
+                break;
+            }
+            if (ManipulationUartDma_SendRaw(cmd->armPayload))
+                Logger_Log(LOG_INFO, "[ARM] queued");
+            else
+                Logger_Log(LOG_ERROR, "[ARM] UART8 TX queue failed");
             break;
         }
 

@@ -32,8 +32,8 @@ Core/Src/motor_uart_dma.o: ../Core/Src/motor_uart_dma.c \
  ../Drivers/STM32H7xx_HAL_Driver/Inc/stm32h7xx_hal_uart.h \
  ../Drivers/STM32H7xx_HAL_Driver/Inc/stm32h7xx_hal_uart_ex.h \
  ../Core/Inc/rover_types.h ../Core/Inc/motor_tx_dma.h ../Core/Inc/main.h \
- ../Core/Inc/safety_manager.h ../Core/Inc/motor_tuning_config.h \
- ../Core/Inc/logger.h
+ ../Core/Inc/manipulation_uart_dma.h ../Core/Inc/safety_manager.h \
+ ../Core/Inc/motor_tuning_config.h ../Core/Inc/logger.h
 ../Core/Inc/motor_uart_dma.h:
 ../Core/Inc/app_config.h:
 ../Drivers/STM32H7xx_HAL_Driver/Inc/stm32h7xx_hal.h:
@@ -70,6 +70,7 @@ Core/Src/motor_uart_dma.o: ../Core/Src/motor_uart_dma.c \
 ../Core/Inc/rover_types.h:
 ../Core/Inc/motor_tx_dma.h:
 ../Core/Inc/main.h:
+../Core/Inc/manipulation_uart_dma.h:
 ../Core/Inc/safety_manager.h:
 ../Core/Inc/motor_tuning_config.h:
 ../Core/Inc/logger.h:
