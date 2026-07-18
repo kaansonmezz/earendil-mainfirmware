@@ -36,8 +36,7 @@ void App_Init(void)
     /* Auto-init magnetometer (QMC5883L) at startup */
     {
         extern I2C_HandleTypeDef hi2c1;
-        static MAG_QMC5883P_Handle_t mag_handle = {0};
-        MAG_QMC5883P_Init(&hi2c1, &mag_handle);
+        MAG_QMC5883P_Init(&hi2c1, &g_mag_handle);
     }
 
     TerminalIf_Init();

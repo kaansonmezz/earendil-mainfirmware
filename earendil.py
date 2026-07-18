@@ -57,7 +57,7 @@ if _missing:
     sys.exit(1)
 
 # -- TCP defaults -----------------------------------------------------------
-DEFAULT_BRIDGE_HOST = "192.168.50.20"
+DEFAULT_BRIDGE_HOST = "127.0.0.1"
 DEFAULT_BRIDGE_PORT = 5000
 DEFAULT_CONNECT_TIMEOUT_MS = 5000
 MAX_TCP_RX_BUFFER_SIZE = 65536
@@ -4320,6 +4320,30 @@ class EarendilControlGui(QMainWindow):
         grp = QGroupBox("Console")
         lay = QVBoxLayout(grp)
 
+        # -- H7 Console -----------------------------------------------
+        lbl_h7 = QLabel("H7 Console")
+        lbl_h7.setStyleSheet(
+            "color: #D4AF37; font-weight: bold; font-size: 13px;"
+        )
+        lay.addWidget(lbl_h7)
+
+        self._h7_console = QTextEdit()
+        self._h7_console.setReadOnly(True)
+        self._h7_console.setStyleSheet(
+            "QTextEdit { background-color: #0B0B0D; border: 1px solid #D4AF37; "
+            "border-radius: 4px; color: #D4AF37; "
+            "font-family: 'Consolas', 'Courier New', monospace; font-size: 12px; }"
+        )
+        self._h7_console.document().setMaximumBlockCount(5000)
+        lay.addWidget(self._h7_console)
+
+        h7_btn_row = QHBoxLayout()
+        btn_clear_h7 = QPushButton("Clear H7 Console")
+        btn_clear_h7.clicked.connect(self._h7_console.clear)
+        h7_btn_row.addWidget(btn_clear_h7)
+        h7_btn_row.addStretch()
+        lay.addLayout(h7_btn_row)
+
         # -- GUI Console -----------------------------------------------
         self._lbl_gui_console_title = QLabel("GUI Console")
         self._lbl_gui_console_title.setStyleSheet(
@@ -4336,6 +4360,24 @@ class EarendilControlGui(QMainWindow):
         )
         self._gui_console.document().setMaximumBlockCount(2000)
         lay.addWidget(self._gui_console)
+
+        # -- H7 Command Input -----------------------------------------
+        cmd_row = QHBoxLayout()
+        self._cmd_input = QLineEdit()
+        self._cmd_input.setPlaceholderText("H7 command (e.g. magraw, help, i2cscan)")
+        self._cmd_input.setStyleSheet(
+            "QLineEdit { background-color: #0B0B0D; border: 1px solid #5F5A4A; "
+            "border-radius: 4px; color: #D4AF37; padding: 4px 8px; "
+            "font-family: 'Consolas', 'Courier New', monospace; font-size: 12px; }"
+        )
+        self._cmd_input.returnPressed.connect(self._on_cmd_send)
+        cmd_row.addWidget(self._cmd_input)
+
+        btn_send_cmd = QPushButton("Send")
+        btn_send_cmd.clicked.connect(self._on_cmd_send)
+        cmd_row.addWidget(btn_send_cmd)
+
+        lay.addLayout(cmd_row)
 
         btn_clear_gui = QPushButton("Clear GUI Console")
         btn_clear_gui.clicked.connect(self._gui_console.clear)
@@ -4453,10 +4495,19 @@ class EarendilControlGui(QMainWindow):
         )
 
     def _style_console_widgets(self):
-        """Re-style the GUI console and its section label for the active theme."""
+        """Re-style the console widgets for the active theme."""
         c = self._colors()
 
-        # Keep references to the section labels so they can be re-themed.
+        # H7 Console
+        if hasattr(self, "_h7_console"):
+            self._h7_console.setStyleSheet(
+                f"QTextEdit {{ background-color: {c['bg_console']}; "
+                f"border: 1px solid #D4AF37; "
+                f"border-radius: 4px; color: #D4AF37; "
+                "font-family: 'Consolas', 'Courier New', monospace; font-size: 12px; }"
+            )
+
+        # GUI Console
         if hasattr(self, "_lbl_gui_console_title"):
             self._lbl_gui_console_title.setStyleSheet(
                 f"color: {c['text_muted']}; font-weight: bold; font-size: 13px;"
@@ -5034,6 +5085,11 @@ class EarendilControlGui(QMainWindow):
         return True
 
     def _on_rx_line(self, line: str):
+        # Show every H7 line in the H7 console
+        if hasattr(self, "_h7_console"):
+            self._h7_console.append(line)
+            self._h7_console.moveCursor(QTextCursor.End)
+
         # Motor telemetry is exclusive — a [TEL][FL] line must not also
         # update arm or drill tables.
         if self._parse_motor_telemetry_line(line):
@@ -6256,6 +6312,17 @@ class EarendilControlGui(QMainWindow):
         self._cfgread_retry_timer.stop()
         self._cfgread_timeout_timer.stop()
         self._cfgread_apply_timer.stop()
+
+    def _on_cmd_send(self):
+        """Send the text from the H7 command input field to the H7."""
+        cmd = self._cmd_input.text().strip()
+        if not cmd:
+            return
+        if not self._tcp_is_connected():
+            self._log_warn("Cannot send to H7: not connected.")
+            return
+        self._send_cmd(cmd)
+        self._cmd_input.clear()
 
     def _send_cmd(self, cmd: str, *, quiet: bool = False, track_arm: bool = True) -> bool:
         """Send a raw command string to the H7 via TCP.

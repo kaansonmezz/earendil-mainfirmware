@@ -47,6 +47,8 @@ typedef struct
 
 /* ── Public API ──────────────────────────────────────────────────────────── */
 
+extern MAG_QMC5883P_Handle_t g_mag_handle;
+
 /* Low-level register read (polling I2C). */
 HAL_StatusTypeDef MAG_QMC5883P_ReadReg(I2C_HandleTypeDef *hi2c, uint8_t reg, uint8_t *value);
 

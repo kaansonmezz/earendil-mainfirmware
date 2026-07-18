@@ -15,7 +15,7 @@ Type=simple
 #
 User=garth
 WorkingDirectory=/home/garth/H7-DMA
-ExecStart=/usr/bin/python3 /home/garth/H7-DMA/tcp_uart_bridge.py --host 0.0.0.0 --port 5000 --serial-device /dev/serial/by-id/REPLACE_WITH_ACTUAL_H7_DEVICE --baud 115200 --allow-client 192.168.50.10/32 --log-level INFO
+ExecStart=/usr/bin/python3 /home/garth/H7-DMA/tcp_uart_bridge.py --host 0.0.0.0 --port 5000 --serial-device /dev/serial/by-id/usb-STMicroelectronics_STLINK-V3_003A00303434511834313937-if02 --baud 115200 --allow-client 192.168.50.10/32 --log-level INFO
 Restart=always
 RestartSec=1
 TimeoutStopSec=5

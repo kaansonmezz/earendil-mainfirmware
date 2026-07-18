@@ -831,9 +831,8 @@ void CommandHandler_Handle(const TerminalCommand_t *cmd)
         case TCMD_MAGINIT:
         {
             extern I2C_HandleTypeDef hi2c1;
-            static MAG_QMC5883P_Handle_t mag_handle = {0};
-            HAL_StatusTypeDef st = MAG_QMC5883P_Init(&hi2c1, &mag_handle);
-            if (st == HAL_OK && mag_handle.initialized)
+            HAL_StatusTypeDef st = MAG_QMC5883P_Init(&hi2c1, &g_mag_handle);
+            if (st == HAL_OK && g_mag_handle.initialized)
             {
                 uint8_t sr = 0, ctrl2 = 0, ctrl1 = 0;
                 MAG_QMC5883P_ReadReg(&hi2c1, MAG_QMC5883P_REG_SET_RESET, &sr);
@@ -842,15 +841,15 @@ void CommandHandler_Handle(const TerminalCommand_t *cmd)
                 Logger_Log(LOG_INFO,
                            "MAG_INIT,CHIP:QMC5883L,ADDR:0x%02X,CHIP_ID:0x%02X,"
                            "SETRST:0x%02X,CTRL2:0x%02X,CTRL1:0x%02X,OK:1",
-                           (unsigned)mag_handle.addr7,
-                           (unsigned)mag_handle.chip_id,
+                           (unsigned)g_mag_handle.addr7,
+                           (unsigned)g_mag_handle.chip_id,
                            (unsigned)sr, (unsigned)ctrl2, (unsigned)ctrl1);
             }
             else
             {
                 const char *err = "UNKNOWN";
-                if (!mag_handle.found) err = "NOT_FOUND";
-                else if (mag_handle.chip_id != MAG_QMC5883P_CHIP_ID_EXPECTED) err = "CHIP_ID";
+                if (!g_mag_handle.found) err = "NOT_FOUND";
+                else if (g_mag_handle.chip_id != MAG_QMC5883P_CHIP_ID_EXPECTED) err = "CHIP_ID";
                 Logger_Log(LOG_INFO, "MAG_INIT,OK:0,ERR:%s", err);
             }
             break;
@@ -859,9 +858,8 @@ void CommandHandler_Handle(const TerminalCommand_t *cmd)
         case TCMD_MAGRAW:
         {
             extern I2C_HandleTypeDef hi2c1;
-            static MAG_QMC5883P_Handle_t mag_handle = {0};
             MAG_QMC5883P_Raw_t raw;
-            HAL_StatusTypeDef st = MAG_QMC5883P_ReadRaw(&hi2c1, &mag_handle, &raw);
+            HAL_StatusTypeDef st = MAG_QMC5883P_ReadRaw(&hi2c1, &g_mag_handle, &raw);
             if (st == HAL_OK)
             {
                 uint8_t drdy = (raw.status & MAG_QMC5883P_STATUS_DRDY) ? 1U : 0U;
@@ -882,8 +880,7 @@ void CommandHandler_Handle(const TerminalCommand_t *cmd)
         case TCMD_MAGIMU:
         {
             extern I2C_HandleTypeDef hi2c1;
-            static MAG_QMC5883P_Handle_t mag_handle = {0};
-            MAG_QMC5883P_ReadImu(&hi2c1, &mag_handle);
+            MAG_QMC5883P_ReadImu(&hi2c1, &g_mag_handle);
             break;
         }
 

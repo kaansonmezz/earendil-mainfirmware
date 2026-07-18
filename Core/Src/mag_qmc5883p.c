@@ -2,6 +2,8 @@
 #include "logger.h"
 #include <string.h>
 
+MAG_QMC5883P_Handle_t g_mag_handle = {0};
+
 /* ── I2C timeout ─────────────────────────────────────────────────────────── */
 #define MAG_I2C_TIMEOUT_MS  50U
 
@@ -134,15 +136,17 @@ HAL_StatusTypeDef MAG_QMC5883P_Init(I2C_HandleTypeDef *hi2c, MAG_QMC5883P_Handle
 
 /* ── Raw read ────────────────────────────────────────────────────────────── */
 
+#define MAG_DRDY_TIMEOUT_MS  10U
+
 HAL_StatusTypeDef MAG_QMC5883P_ReadRaw(I2C_HandleTypeDef *hi2c, MAG_QMC5883P_Handle_t *mag, MAG_QMC5883P_Raw_t *raw)
 {
     if (mag == NULL || raw == NULL)
         return HAL_ERROR;
 
-    /* Auto-detect if not already found */
-    if (!mag->found)
+    /* Auto-init if not already initialized */
+    if (!mag->initialized)
     {
-        HAL_StatusTypeDef st = MAG_QMC5883P_Detect(hi2c, mag);
+        HAL_StatusTypeDef st = MAG_QMC5883P_Init(hi2c, mag);
         if (st != HAL_OK)
             return st;
     }
@@ -150,11 +154,21 @@ HAL_StatusTypeDef MAG_QMC5883P_ReadRaw(I2C_HandleTypeDef *hi2c, MAG_QMC5883P_Han
     memset(raw, 0, sizeof(*raw));
     raw->chip_id = mag->chip_id;
 
-    /* Read status register */
-    HAL_StatusTypeDef st = Mag_ReadReg(hi2c, MAG_QMC5883P_ADDR7,
-                                       MAG_QMC5883P_REG_STATUS, &raw->status);
-    if (st != HAL_OK)
-        return st;
+    /* Poll STATUS.DRDY before reading data */
+    uint32_t t0 = HAL_GetTick();
+    HAL_StatusTypeDef st;
+    do
+    {
+        st = Mag_ReadReg(hi2c, MAG_QMC5883P_ADDR7,
+                         MAG_QMC5883P_REG_STATUS, &raw->status);
+        if (st != HAL_OK)
+            return st;
+        if (raw->status & MAG_QMC5883P_STATUS_DRDY)
+            break;
+    } while ((HAL_GetTick() - t0) < MAG_DRDY_TIMEOUT_MS);
+
+    if (!(raw->status & MAG_QMC5883P_STATUS_DRDY))
+        return HAL_TIMEOUT;
 
     /* Read 6 bytes: X_LSB, X_MSB, Y_LSB, Y_MSB, Z_LSB, Z_MSB */
     uint8_t buf[6];

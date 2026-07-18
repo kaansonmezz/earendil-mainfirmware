@@ -82,6 +82,9 @@ HAL_StatusTypeDef IMU_MPU9250_FindAndWriteReg(I2C_HandleTypeDef *hi2c,
 {
     for (uint8_t addr = 0x03; addr <= 0x68; addr++)
     {
+        if (addr == MAG_QMC5883P_ADDR7)
+            continue;
+
         uint32_t err = 0;
         HAL_StatusTypeDef probe = I2C_Scanner_Probe7(hi2c, addr, &err);
 
@@ -147,6 +150,9 @@ HAL_StatusTypeDef IMU_MPU9250_FindAndReadReg(I2C_HandleTypeDef *hi2c,
 {
     for (uint8_t addr = 0x03; addr <= 0x68; addr++)
     {
+        if (addr == MAG_QMC5883P_ADDR7)
+            continue;
+
         uint32_t err = 0;
         HAL_StatusTypeDef probe = I2C_Scanner_Probe7(hi2c, addr, &err);
 
@@ -197,6 +203,9 @@ HAL_StatusTypeDef IMU_MPU9250_FindAndReadWho(I2C_HandleTypeDef *hi2c,
 
     for (uint8_t addr = 0x03; addr <= 0x68; addr++)
     {
+        if (addr == MAG_QMC5883P_ADDR7)
+            continue;
+
         uint32_t err = 0;
         HAL_StatusTypeDef probe = I2C_Scanner_Probe7(hi2c, addr, &err);
 
@@ -539,6 +548,9 @@ void IMU_MPU9250_CfgTest(I2C_HandleTypeDef *hi2c)
             HAL_StatusTypeDef probe = HAL_ERROR;
             for (uint8_t addr = 0x03; addr <= 0x68; addr++)
             {
+                if (addr == MAG_QMC5883P_ADDR7)
+                    continue;
+
                 uint32_t err = 0;
                 probe = I2C_Scanner_Probe7(hi2c, addr, &err);
                 if (addr < 0x68)
@@ -579,6 +591,9 @@ void IMU_MPU9250_CfgTest(I2C_HandleTypeDef *hi2c)
             HAL_StatusTypeDef probe = HAL_ERROR;
             for (uint8_t addr = 0x03; addr <= 0x68; addr++)
             {
+                if (addr == MAG_QMC5883P_ADDR7)
+                    continue;
+
                 uint32_t err = 0;
                 probe = I2C_Scanner_Probe7(hi2c, addr, &err);
                 if (addr < 0x68)
@@ -682,6 +697,9 @@ HAL_StatusTypeDef IMU_MPU9250_FindAndReadBytes(I2C_HandleTypeDef *hi2c,
 {
     for (uint8_t addr = 0x03; addr <= 0x68; addr++)
     {
+        if (addr == MAG_QMC5883P_ADDR7)
+            continue;
+
         uint32_t err = 0;
         HAL_StatusTypeDef probe = I2C_Scanner_Probe7(hi2c, addr, &err);
 
@@ -730,6 +748,9 @@ HAL_StatusTypeDef IMU_MPU9250_FindAndReadBytesVerbose(I2C_HandleTypeDef *hi2c,
 {
     for (uint8_t addr = 0x03; addr <= 0x68; addr++)
     {
+        if (addr == MAG_QMC5883P_ADDR7)
+            continue;
+
         uint32_t err = 0;
         HAL_StatusTypeDef probe = I2C_Scanner_Probe7(hi2c, addr, &err);
 
@@ -806,9 +827,11 @@ HAL_StatusTypeDef IMU_MPU9250_ReadRaw(I2C_HandleTypeDef *hi2c,
                                       IMU_MPU9250_Raw_t *raw)
 {
     uint8_t buf[14];
-    HAL_StatusTypeDef st = IMU_MPU9250_FindAndReadBytes(hi2c,
-                                                        MPU9250_REG_ACCEL_XOUT_H,
-                                                        buf, 14);
+    hi2c->ErrorCode = HAL_I2C_ERROR_NONE;
+    HAL_StatusTypeDef st = HAL_I2C_Mem_Read(hi2c, MPU9250_ADDR_HAL,
+                                             MPU9250_REG_ACCEL_XOUT_H,
+                                             I2C_MEMADD_SIZE_8BIT,
+                                             buf, 14, 100);
     if (st != HAL_OK)
         return HAL_ERROR;
 
@@ -1338,6 +1361,7 @@ void IMU_StreamTask(void)
     }
 
     /* Print magnetometer telemetry regardless of MPU status */
-    static MAG_QMC5883P_Handle_t mag_handle = {0};
-    MAG_QMC5883P_ReadImu(&hi2c1, &mag_handle);
+    if (!g_mag_handle.initialized)
+        MAG_QMC5883P_Init(&hi2c1, &g_mag_handle);
+    MAG_QMC5883P_ReadImu(&hi2c1, &g_mag_handle);
 }
