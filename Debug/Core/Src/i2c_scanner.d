@@ -31,7 +31,8 @@ Core/Src/i2c_scanner.o: ../Core/Src/i2c_scanner.c \
  ../Drivers/STM32H7xx_HAL_Driver/Inc/stm32h7xx_hal_pwr_ex.h \
  ../Drivers/STM32H7xx_HAL_Driver/Inc/stm32h7xx_hal_uart.h \
  ../Drivers/STM32H7xx_HAL_Driver/Inc/stm32h7xx_hal_uart_ex.h \
- ../Core/Inc/logger.h ../Core/Inc/rover_types.h
+ ../Core/Inc/i2c_recovery.h ../Core/Inc/logger.h \
+ ../Core/Inc/rover_types.h
 ../Core/Inc/i2c_scanner.h:
 ../Drivers/STM32H7xx_HAL_Driver/Inc/stm32h7xx_hal.h:
 ../Core/Inc/stm32h7xx_hal_conf.h:
@@ -64,5 +65,6 @@ Core/Src/i2c_scanner.o: ../Core/Src/i2c_scanner.c \
 ../Drivers/STM32H7xx_HAL_Driver/Inc/stm32h7xx_hal_pwr_ex.h:
 ../Drivers/STM32H7xx_HAL_Driver/Inc/stm32h7xx_hal_uart.h:
 ../Drivers/STM32H7xx_HAL_Driver/Inc/stm32h7xx_hal_uart_ex.h:
+../Core/Inc/i2c_recovery.h:
 ../Core/Inc/logger.h:
 ../Core/Inc/rover_types.h:

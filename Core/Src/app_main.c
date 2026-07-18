@@ -36,7 +36,9 @@ void App_Init(void)
     /* Auto-init magnetometer (QMC5883L) at startup */
     {
         extern I2C_HandleTypeDef hi2c1;
-        MAG_QMC5883P_Init(&hi2c1, &g_mag_handle);
+        HAL_StatusTypeDef mag_st = MAG_QMC5883P_Init(&hi2c1, &g_mag_handle);
+        if (mag_st != HAL_OK)
+            Logger_Log(LOG_BOOT, "QMC5883P magnetometer init FAILED (will retry on read)");
     }
 
     TerminalIf_Init();

@@ -8,6 +8,12 @@
 
 #define MPU_I2C_TIMEOUT_MS  50U
 
+/* ── MPU address cache ─────────────────────────────────────────────────────
+ * Once the MPU9250/MPU6500 has been confirmed at 0x68 via WHO_AM_I,
+ * skip the expensive 0x03-0x68 scan on every subsequent I2C transaction.
+ * This eliminates ~100 unnecessary bus probes per IMU read cycle. */
+static uint8_t mpu_confirmed = 0;
+
 /* ── Supported WHO_AM_I helper ───────────────────────────────────────────── */
 
 uint8_t IMU_MPU9250_IsSupportedWho(uint8_t who)
@@ -80,6 +86,27 @@ HAL_StatusTypeDef IMU_MPU9250_ReadReg(I2C_HandleTypeDef *hi2c,
 HAL_StatusTypeDef IMU_MPU9250_FindAndWriteReg(I2C_HandleTypeDef *hi2c,
                                                uint8_t reg, uint8_t value)
 {
+    /* If MPU is already confirmed at 0x68, skip the scan entirely. */
+    if (mpu_confirmed)
+    {
+        hi2c->ErrorCode = HAL_I2C_ERROR_NONE;
+        HAL_StatusTypeDef mem_st = HAL_I2C_Mem_Write(hi2c, MPU9250_ADDR_HAL,
+                                                      reg,
+                                                      I2C_MEMADD_SIZE_8BIT,
+                                                      &value, 1, 100);
+        if (mem_st == HAL_OK)
+            return HAL_OK;
+
+        uint8_t buf[2] = { reg, value };
+        hi2c->ErrorCode = HAL_I2C_ERROR_NONE;
+        HAL_StatusTypeDef man_st = HAL_I2C_Master_Transmit(hi2c,
+                                                            MPU9250_ADDR_HAL,
+                                                            buf, 2, 100);
+
+        return (mem_st == HAL_OK || man_st == HAL_OK) ? HAL_OK : HAL_ERROR;
+    }
+
+    /* Not confirmed yet — scan the bus to find 0x68. */
     for (uint8_t addr = 0x03; addr <= 0x68; addr++)
     {
         if (addr == MAG_QMC5883P_ADDR7)
@@ -148,6 +175,15 @@ HAL_StatusTypeDef IMU_MPU9250_FindAndWriteReg(I2C_HandleTypeDef *hi2c,
 HAL_StatusTypeDef IMU_MPU9250_FindAndReadReg(I2C_HandleTypeDef *hi2c,
                                               uint8_t reg, uint8_t *value)
 {
+    /* If MPU is already confirmed at 0x68, skip the scan entirely. */
+    if (mpu_confirmed)
+    {
+        hi2c->ErrorCode = HAL_I2C_ERROR_NONE;
+        return HAL_I2C_Mem_Read(hi2c, MPU9250_ADDR_HAL, reg,
+                                I2C_MEMADD_SIZE_8BIT, value, 1, 100);
+    }
+
+    /* Not confirmed yet — scan the bus to find 0x68. */
     for (uint8_t addr = 0x03; addr <= 0x68; addr++)
     {
         if (addr == MAG_QMC5883P_ADDR7)
@@ -201,6 +237,12 @@ HAL_StatusTypeDef IMU_MPU9250_FindAndReadWho(I2C_HandleTypeDef *hi2c,
     uint8_t who_manual = 0xEE;
     uint8_t reg = MPU9250_REG_WHO_AM_I;
 
+    /* If MPU is already confirmed at 0x68, skip the scan. */
+    if (mpu_confirmed)
+    {
+        goto do_read;
+    }
+
     for (uint8_t addr = 0x03; addr <= 0x68; addr++)
     {
         if (addr == MAG_QMC5883P_ADDR7)
@@ -223,62 +265,64 @@ HAL_StatusTypeDef IMU_MPU9250_FindAndReadWho(I2C_HandleTypeDef *hi2c,
             return HAL_ERROR;
         }
 
-        /* Mem_Read */
-        hi2c->ErrorCode = HAL_I2C_ERROR_NONE;
-        HAL_StatusTypeDef mem = HAL_I2C_Mem_Read(hi2c, MPU9250_ADDR_HAL,
-                                                  MPU9250_REG_WHO_AM_I,
-                                                  I2C_MEMADD_SIZE_8BIT,
-                                                  &who_mem, 1, 100);
-        uint32_t mem_err = HAL_I2C_GetError(hi2c);
-
-        /* Manual TX + RX */
-        hi2c->ErrorCode = HAL_I2C_ERROR_NONE;
-        HAL_StatusTypeDef tx = HAL_I2C_Master_Transmit(hi2c, MPU9250_ADDR_HAL,
-                                                        &reg, 1, 100);
-        uint32_t tx_err = HAL_I2C_GetError(hi2c);
-
-        if (tx == HAL_OK)
-            HAL_Delay(1);
-
-        hi2c->ErrorCode = HAL_I2C_ERROR_NONE;
-        HAL_StatusTypeDef rx = HAL_ERROR;
-        uint32_t rx_err = 0;
-        if (tx == HAL_OK)
-        {
-            rx = HAL_I2C_Master_Receive(hi2c, MPU9250_ADDR_HAL,
-                                         &who_manual, 1, 100);
-            rx_err = HAL_I2C_GetError(hi2c);
-        }
-
-        uint8_t ok = ((mem == HAL_OK && IMU_MPU9250_IsSupportedWho(who_mem)) ||
-                      (rx == HAL_OK && IMU_MPU9250_IsSupportedWho(who_manual)))
-                     ? 1U : 0U;
-
-        if (mem == HAL_OK && IMU_MPU9250_IsSupportedWho(who_mem))
-            *who_out = who_mem;
-        else if (rx == HAL_OK && IMU_MPU9250_IsSupportedWho(who_manual))
-            *who_out = who_manual;
-        else
-            *who_out = (who_mem != 0xEE) ? who_mem : who_manual;
-
-        Logger_Log(LOG_INFO,
-                   "MPU_FINDWHO,ADDR:0x68,"
-                   "MEM_HAL:%d,MEM_ERR:%lu,MEM_WHO:0x%02X,"
-                   "TX_HAL:%d,TX_ERR:%lu,"
-                   "RX_HAL:%d,RX_ERR:%lu,"
-                   "MAN_WHO:0x%02X,OK:%u",
-                   (int)mem, (unsigned long)mem_err, who_mem,
-                   (int)tx, (unsigned long)tx_err,
-                   (int)rx, (unsigned long)rx_err,
-                   who_manual, ok);
-
-        return ok ? HAL_OK : HAL_ERROR;
+        /* Found 0x68 — fall through to the read section below. */
+        break;
     }
 
+do_read:
+    /* Mem_Read */
+    hi2c->ErrorCode = HAL_I2C_ERROR_NONE;
+    HAL_StatusTypeDef mem = HAL_I2C_Mem_Read(hi2c, MPU9250_ADDR_HAL,
+                                              MPU9250_REG_WHO_AM_I,
+                                              I2C_MEMADD_SIZE_8BIT,
+                                              &who_mem, 1, 100);
+    uint32_t mem_err = HAL_I2C_GetError(hi2c);
+
+    /* Manual TX + RX */
+    hi2c->ErrorCode = HAL_I2C_ERROR_NONE;
+    HAL_StatusTypeDef tx = HAL_I2C_Master_Transmit(hi2c, MPU9250_ADDR_HAL,
+                                                    &reg, 1, 100);
+    uint32_t tx_err = HAL_I2C_GetError(hi2c);
+
+    if (tx == HAL_OK)
+        HAL_Delay(1);
+
+    hi2c->ErrorCode = HAL_I2C_ERROR_NONE;
+    HAL_StatusTypeDef rx = HAL_ERROR;
+    uint32_t rx_err = 0;
+    if (tx == HAL_OK)
+    {
+        rx = HAL_I2C_Master_Receive(hi2c, MPU9250_ADDR_HAL,
+                                     &who_manual, 1, 100);
+        rx_err = HAL_I2C_GetError(hi2c);
+    }
+
+    uint8_t ok = ((mem == HAL_OK && IMU_MPU9250_IsSupportedWho(who_mem)) ||
+                  (rx == HAL_OK && IMU_MPU9250_IsSupportedWho(who_manual)))
+                 ? 1U : 0U;
+
+    if (mem == HAL_OK && IMU_MPU9250_IsSupportedWho(who_mem))
+        *who_out = who_mem;
+    else if (rx == HAL_OK && IMU_MPU9250_IsSupportedWho(who_manual))
+        *who_out = who_manual;
+    else
+        *who_out = (who_mem != 0xEE) ? who_mem : who_manual;
+
     Logger_Log(LOG_INFO,
-               "MPU_FINDWHO,ADDR:0x68,MEM_HAL:-1,MEM_ERR:0,MEM_WHO:0xEE,"
-               "TX_HAL:-1,TX_ERR:0,RX_HAL:-1,RX_ERR:0,MAN_WHO:0xEE,OK:0");
-    return HAL_ERROR;
+               "MPU_FINDWHO,ADDR:0x68,"
+               "MEM_HAL:%d,MEM_ERR:%lu,MEM_WHO:0x%02X,"
+               "TX_HAL:%d,TX_ERR:%lu,"
+               "RX_HAL:%d,RX_ERR:%lu,"
+               "MAN_WHO:0x%02X,OK:%u",
+               (int)mem, (unsigned long)mem_err, who_mem,
+               (int)tx, (unsigned long)tx_err,
+               (int)rx, (unsigned long)rx_err,
+               who_manual, ok);
+
+    if (ok)
+        mpu_confirmed = 1;
+
+    return ok ? HAL_OK : HAL_ERROR;
 }
 
 void IMU_MPU9250_WhoAmI(I2C_HandleTypeDef *hi2c)
@@ -406,7 +450,8 @@ HAL_StatusTypeDef IMU_MPU9250_InitBasic(I2C_HandleTypeDef *hi2c)
     Logger_Log(LOG_INFO, "MPU_INIT,WHO:0x%02X,CHIP:%s,OK:1", who, ChipName(who));
     uint8_t is_compat_mode = (who == 0x70U) ? 1U : 0U;
 
-    /* b. Reset device using find-and-write path */
+    /* b. Reset device — clear cache so FindAndReadWho re-scans. */
+    mpu_confirmed = 0;
     HAL_StatusTypeDef reset_st = IMU_MPU9250_FindAndWriteReg(hi2c,
                                                               MPU9250_REG_PWR_MGMT_1,
                                                               0x80);
@@ -695,6 +740,31 @@ HAL_StatusTypeDef IMU_MPU9250_FindAndReadBytes(I2C_HandleTypeDef *hi2c,
                                                uint8_t start_reg,
                                                uint8_t *buf, uint16_t len)
 {
+    /* If MPU is already confirmed at 0x68, skip the scan entirely. */
+    if (mpu_confirmed)
+    {
+        hi2c->ErrorCode = HAL_I2C_ERROR_NONE;
+        HAL_StatusTypeDef mem_st = HAL_I2C_Mem_Read(hi2c, MPU9250_ADDR_HAL,
+                                                     start_reg,
+                                                     I2C_MEMADD_SIZE_8BIT,
+                                                     buf, len, 100);
+        if (mem_st == HAL_OK)
+            return HAL_OK;
+
+        hi2c->ErrorCode = HAL_I2C_ERROR_NONE;
+        HAL_StatusTypeDef tx_st = HAL_I2C_Master_Transmit(hi2c, MPU9250_ADDR_HAL,
+                                                           &start_reg, 1, 100);
+        HAL_StatusTypeDef rx_st = HAL_ERROR;
+        if (tx_st == HAL_OK)
+        {
+            hi2c->ErrorCode = HAL_I2C_ERROR_NONE;
+            rx_st = HAL_I2C_Master_Receive(hi2c, MPU9250_ADDR_HAL,
+                                            buf, len, 100);
+        }
+        return (mem_st == HAL_OK || rx_st == HAL_OK) ? HAL_OK : HAL_ERROR;
+    }
+
+    /* Not confirmed yet — scan the bus to find 0x68. */
     for (uint8_t addr = 0x03; addr <= 0x68; addr++)
     {
         if (addr == MAG_QMC5883P_ADDR7)
@@ -746,6 +816,57 @@ HAL_StatusTypeDef IMU_MPU9250_FindAndReadBytesVerbose(I2C_HandleTypeDef *hi2c,
                                                       uint8_t start_reg,
                                                       uint8_t *buf, uint16_t len)
 {
+    /* If MPU is already confirmed at 0x68, skip the scan entirely. */
+    if (mpu_confirmed)
+    {
+        hi2c->ErrorCode = HAL_I2C_ERROR_NONE;
+        HAL_StatusTypeDef mem_st = HAL_I2C_Mem_Read(hi2c, MPU9250_ADDR_HAL,
+                                                     start_reg,
+                                                     I2C_MEMADD_SIZE_8BIT,
+                                                     buf, len, 100);
+        uint32_t mem_err = HAL_I2C_GetError(hi2c);
+
+        if (mem_st == HAL_OK)
+        {
+            Logger_Log(LOG_INFO,
+                       "MPU_FINDBURST,ADDR:0x68,REG:0x%02X,LEN:%u,"
+                       "MEM_HAL:%d,MEM_ERR:%lu,TX_HAL:-,TX_ERR:-,"
+                       "RX_HAL:-,RX_ERR:-,OK:1",
+                       start_reg, len,
+                       (int)mem_st, (unsigned long)mem_err);
+            return HAL_OK;
+        }
+
+        hi2c->ErrorCode = HAL_I2C_ERROR_NONE;
+        HAL_StatusTypeDef tx_st = HAL_I2C_Master_Transmit(hi2c, MPU9250_ADDR_HAL,
+                                                           &start_reg, 1, 100);
+        uint32_t tx_err = HAL_I2C_GetError(hi2c);
+
+        HAL_StatusTypeDef rx_st = HAL_ERROR;
+        uint32_t rx_err = 0;
+        if (tx_st == HAL_OK)
+        {
+            hi2c->ErrorCode = HAL_I2C_ERROR_NONE;
+            rx_st = HAL_I2C_Master_Receive(hi2c, MPU9250_ADDR_HAL,
+                                            buf, len, 100);
+            rx_err = HAL_I2C_GetError(hi2c);
+        }
+
+        uint8_t ok = (mem_st == HAL_OK || rx_st == HAL_OK) ? 1U : 0U;
+        Logger_Log(LOG_INFO,
+                   "MPU_FINDBURST,ADDR:0x68,REG:0x%02X,LEN:%u,"
+                   "MEM_HAL:%d,MEM_ERR:%lu,"
+                   "TX_HAL:%d,TX_ERR:%lu,"
+                   "RX_HAL:%d,RX_ERR:%lu,OK:%u",
+                   start_reg, len,
+                   (int)mem_st, (unsigned long)mem_err,
+                   (int)tx_st, (unsigned long)tx_err,
+                   (int)rx_st, (unsigned long)rx_err, ok);
+
+        return ok ? HAL_OK : HAL_ERROR;
+    }
+
+    /* Not confirmed yet — scan the bus to find 0x68. */
     for (uint8_t addr = 0x03; addr <= 0x68; addr++)
     {
         if (addr == MAG_QMC5883P_ADDR7)

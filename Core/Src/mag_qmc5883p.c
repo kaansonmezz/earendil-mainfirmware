@@ -1,11 +1,12 @@
 #include "mag_qmc5883p.h"
+#include "i2c_recovery.h"
 #include "logger.h"
 #include <string.h>
 
 MAG_QMC5883P_Handle_t g_mag_handle = {0};
 
 /* ── I2C timeout ─────────────────────────────────────────────────────────── */
-#define MAG_I2C_TIMEOUT_MS  50U
+#define MAG_I2C_TIMEOUT_MS  100U
 
 /* ── Conversion constants for ±8 Gauss range ─────────────────────────────── */
 #define MAG_QMC5883P_LSB_PER_GAUSS       3750
@@ -106,7 +107,17 @@ HAL_StatusTypeDef MAG_QMC5883P_Init(I2C_HandleTypeDef *hi2c, MAG_QMC5883P_Handle
     {
         HAL_StatusTypeDef st = MAG_QMC5883P_Detect(hi2c, mag);
         if (st != HAL_OK)
-            return st;
+        {
+            /* Bus may be stuck — try recovery and retry once. */
+            Logger_Log(LOG_INFO, "MAG_INIT,DETECT_FAIL,TRYING_RECOVERY");
+            I2C_BusRecovery(hi2c);
+            st = MAG_QMC5883P_Detect(hi2c, mag);
+            if (st != HAL_OK)
+            {
+                Logger_Log(LOG_INFO, "MAG_INIT,DETECT_FAIL,AFTER_RECOVERY");
+                return st;
+            }
+        }
     }
 
     /* Verify chip ID */
@@ -136,7 +147,7 @@ HAL_StatusTypeDef MAG_QMC5883P_Init(I2C_HandleTypeDef *hi2c, MAG_QMC5883P_Handle
 
 /* ── Raw read ────────────────────────────────────────────────────────────── */
 
-#define MAG_DRDY_TIMEOUT_MS  10U
+#define MAG_DRDY_TIMEOUT_MS  30U
 
 HAL_StatusTypeDef MAG_QMC5883P_ReadRaw(I2C_HandleTypeDef *hi2c, MAG_QMC5883P_Handle_t *mag, MAG_QMC5883P_Raw_t *raw)
 {
@@ -162,7 +173,13 @@ HAL_StatusTypeDef MAG_QMC5883P_ReadRaw(I2C_HandleTypeDef *hi2c, MAG_QMC5883P_Han
         st = Mag_ReadReg(hi2c, MAG_QMC5883P_ADDR7,
                          MAG_QMC5883P_REG_STATUS, &raw->status);
         if (st != HAL_OK)
-            return st;
+        {
+            /* I2C bus failure — attempt recovery, mark uninitialized. */
+            Logger_Log(LOG_INFO, "MAG_RAW,STATUS_READ_FAIL,HAL:%d,TRYING_RECOVERY", (int)st);
+            I2C_BusRecovery(hi2c);
+            mag->initialized = 0;
+            return HAL_ERROR;
+        }
         if (raw->status & MAG_QMC5883P_STATUS_DRDY)
             break;
     } while ((HAL_GetTick() - t0) < MAG_DRDY_TIMEOUT_MS);
@@ -174,7 +191,12 @@ HAL_StatusTypeDef MAG_QMC5883P_ReadRaw(I2C_HandleTypeDef *hi2c, MAG_QMC5883P_Han
     uint8_t buf[6];
     st = Mag_ReadBytes(hi2c, MAG_QMC5883P_ADDR7, MAG_QMC5883P_REG_X_LSB, buf, 6);
     if (st != HAL_OK)
-        return st;
+    {
+        Logger_Log(LOG_INFO, "MAG_RAW,DATA_READ_FAIL,HAL:%d,TRYING_RECOVERY", (int)st);
+        I2C_BusRecovery(hi2c);
+        mag->initialized = 0;
+        return HAL_ERROR;
+    }
 
     /* Decode little-endian signed 16-bit values */
     raw->x = (int16_t)((buf[1] << 8) | buf[0]);

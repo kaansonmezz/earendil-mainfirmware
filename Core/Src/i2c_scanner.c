@@ -3,6 +3,7 @@
  * Not the final MPU9250 driver — only verifies sensor visibility on I2C1. */
 
 #include "i2c_scanner.h"
+#include "i2c_recovery.h"
 #include "logger.h"
 #include "stm32h7xx_hal.h"
 
@@ -59,6 +60,26 @@ void I2C_ScanBus(void)
     }
 
     Logger_Log(LOG_INFO, "I2C_SCAN,DONE,COUNT:%u", count);
+
+    /* If no devices found, bus may be stuck — try recovery and re-scan. */
+    if (count == 0U)
+    {
+        Logger_Log(LOG_INFO, "I2C_SCAN,NO_DEVICES,TRYING_RECOVERY");
+        I2C_BusRecovery(&hi2c1);
+
+        count = 0U;
+        for (uint8_t addr = I2C_SCAN_ADDR_MIN; addr <= I2C_SCAN_ADDR_MAX; addr++)
+        {
+            uint32_t err = 0;
+            HAL_StatusTypeDef st2 = I2C_Scanner_Probe7(&hi2c1, addr, &err);
+            if (st2 == HAL_OK)
+            {
+                Logger_Log(LOG_INFO, "I2C_SCAN,ADDR:0x%02X", addr);
+                count++;
+            }
+        }
+        Logger_Log(LOG_INFO, "I2C_SCAN,AFTER_RECOVERY,COUNT:%u", count);
+    }
 }
 
 void I2C_Scanner_WarmupRange(I2C_HandleTypeDef *hi2c,

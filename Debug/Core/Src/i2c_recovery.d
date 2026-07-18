@@ -1,5 +1,5 @@
-Core/Src/mag_qmc5883p.o: ../Core/Src/mag_qmc5883p.c \
- ../Core/Inc/mag_qmc5883p.h \
+Core/Src/i2c_recovery.o: ../Core/Src/i2c_recovery.c \
+ ../Core/Inc/i2c_recovery.h \
  ../Drivers/STM32H7xx_HAL_Driver/Inc/stm32h7xx_hal.h \
  ../Core/Inc/stm32h7xx_hal_conf.h \
  ../Drivers/STM32H7xx_HAL_Driver/Inc/stm32h7xx_hal_rcc.h \
@@ -31,9 +31,8 @@ Core/Src/mag_qmc5883p.o: ../Core/Src/mag_qmc5883p.c \
  ../Drivers/STM32H7xx_HAL_Driver/Inc/stm32h7xx_hal_pwr_ex.h \
  ../Drivers/STM32H7xx_HAL_Driver/Inc/stm32h7xx_hal_uart.h \
  ../Drivers/STM32H7xx_HAL_Driver/Inc/stm32h7xx_hal_uart_ex.h \
- ../Core/Inc/i2c_recovery.h ../Core/Inc/logger.h \
- ../Core/Inc/rover_types.h
-../Core/Inc/mag_qmc5883p.h:
+ ../Core/Inc/logger.h ../Core/Inc/rover_types.h
+../Core/Inc/i2c_recovery.h:
 ../Drivers/STM32H7xx_HAL_Driver/Inc/stm32h7xx_hal.h:
 ../Core/Inc/stm32h7xx_hal_conf.h:
 ../Drivers/STM32H7xx_HAL_Driver/Inc/stm32h7xx_hal_rcc.h:
@@ -65,6 +64,5 @@ Core/Src/mag_qmc5883p.o: ../Core/Src/mag_qmc5883p.c \
 ../Drivers/STM32H7xx_HAL_Driver/Inc/stm32h7xx_hal_pwr_ex.h:
 ../Drivers/STM32H7xx_HAL_Driver/Inc/stm32h7xx_hal_uart.h:
 ../Drivers/STM32H7xx_HAL_Driver/Inc/stm32h7xx_hal_uart_ex.h:
-../Core/Inc/i2c_recovery.h:
 ../Core/Inc/logger.h:
 ../Core/Inc/rover_types.h:

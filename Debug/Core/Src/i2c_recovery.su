@@ -1,0 +1,8 @@
+../Core/Src/i2c_recovery.c:26:13:delay_us	24	static,ignoring_inline_asm
+../Core/Src/i2c_recovery.c:34:22:read_sda	8	static
+../Core/Src/i2c_recovery.c:39:13:toggle_scl	8	static
+../Core/Src/i2c_recovery.c:49:26:clock_recovery	72	static
+../Core/Src/i2c_recovery.c:108:19:I2C_BusResetAndReinit	24	static
+../Core/Src/i2c_recovery.c:149:26:bus_idle_check	16	static
+../Core/Src/i2c_recovery.c:163:19:I2C_BusRecovery	24	static
+../Core/Src/i2c_recovery.c:200:19:I2C_RecoverBus	16	static

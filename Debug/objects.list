@@ -3,6 +3,7 @@
 "./Core/Src/app_main.o"
 "./Core/Src/command_handler.o"
 "./Core/Src/control_mode.o"
+"./Core/Src/i2c_recovery.o"
 "./Core/Src/i2c_scanner.o"
 "./Core/Src/imu_mpu9250.o"
 "./Core/Src/logger.o"
