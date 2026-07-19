@@ -22,6 +22,7 @@
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
 #include "app_main.h"
+#include "app_config.h"   /* I2C_TIMING_APP */
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -220,7 +221,8 @@ static void MX_I2C1_Init(void)
   __HAL_RCC_I2C1_RELEASE_RESET();
 
   hi2c1.Instance = I2C1;
-  hi2c1.Init.Timing = 0x20A0ACFE;
+  /* I2C1 kernel clock = 130 MHz. See I2C_TIMING_APP in app_config.h. */
+  hi2c1.Init.Timing = I2C_TIMING_APP;
   hi2c1.Init.OwnAddress1 = 0;
   hi2c1.Init.AddressingMode = I2C_ADDRESSINGMODE_7BIT;
   hi2c1.Init.DualAddressMode = I2C_DUALADDRESS_DISABLE;

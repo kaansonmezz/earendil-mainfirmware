@@ -2,8 +2,11 @@
 """
 Earendil - Rover Control GUI for STM32H723ZG Main Controller
 ============================================================
-Single-file PySide6 + pyserial application.
-Communicates with the H7 firmware over USART3 / ST-LINK VCP.
+Single-file PySide6 application that connects to the Raspberry Pi
+TCP-to-Serial bridge, which forwards commands to the H7 firmware.
+
+Architecture:
+    PC (this GUI)  --TCP-->  Raspberry Pi bridge  --Serial-->  STM32H723
 
 Controls:
     W/A/S/D   -> forward / left / backward / right
@@ -25,7 +28,6 @@ Run:
 import re
 import sys
 import time
-import threading
 from collections import deque
 
 # -- Dependency check -------------------------------------------------------
@@ -37,26 +39,43 @@ try:
         QGroupBox, QTextEdit, QTableWidget, QTableWidgetItem,
         QDialog, QHeaderView, QSplitter, QFrame, QSizePolicy,
         QFormLayout, QSpinBox, QDoubleSpinBox, QGridLayout,
+        QTabWidget, QCheckBox, QMessageBox, QScrollArea,
     )
-    from PySide6.QtCore import Qt, QTimer, Signal, QObject, QThread, QEvent
+    from PySide6.QtCore import Qt, QTimer, QEvent
     from PySide6.QtGui import (
         QFont, QColor, QTextCursor, QKeyEvent, QKeySequence,
         QPainter, QPixmap, QImage,
     )
+    from PySide6.QtNetwork import QTcpSocket, QAbstractSocket
 except ImportError:
     _missing.append("PySide6  (pip install PySide6)")
-
-try:
-    import serial
-    import serial.tools.list_ports
-except ImportError:
-    _missing.append("pyserial  (pip install pyserial)")
 
 if _missing:
     print("ERROR: Missing required packages:")
     for m in _missing:
         print(f"  - {m}")
     sys.exit(1)
+
+# -- TCP defaults -----------------------------------------------------------
+DEFAULT_BRIDGE_HOST = "127.0.0.1"
+DEFAULT_BRIDGE_PORT = 5000
+DEFAULT_CONNECT_TIMEOUT_MS = 5000
+MAX_TCP_RX_BUFFER_SIZE = 65536
+MAX_TCP_TX_BACKLOG = 65536
+CONTROL_HEARTBEAT_PERIOD_MS = 500
+LINKSTAT_RETRY_DELAYS_MS = (300, 800, 1500)
+
+# -- Telemetry freshness tracking -------------------------------------------
+TELEMETRY_FRESHNESS_CHECK_MS = 500
+MOTOR_TELEMETRY_STALE_MS = 2000
+IMU_TELEMETRY_STALE_MS = 3000
+MAG_TELEMETRY_STALE_MS = 3000
+ARM_TELEMETRY_STALE_MS = 3000
+DRILL_TELEMETRY_STALE_MS = 3000
+SENSOR_ONE_SHOT_TIMEOUT_MS = 3000
+IMU_STREAM_AUTODETECT_MIN_PACKETS = 2
+IMU_STREAM_AUTODETECT_MAX_GAP_MS = 1000
+IMU_ONE_SHOT_AUTODETECT_GUARD_MS = 250
 
 
 # ============================================================================
@@ -146,53 +165,6 @@ class LogoBackgroundWidget(QWidget):
 
 
 # ============================================================================
-#  Serial Reader Thread
-# ============================================================================
-
-class SerialReaderThread(QThread):
-    """Background thread that reads lines from the serial port."""
-
-    line_received = Signal(str)
-    error_occurred = Signal(str)
-    disconnected = Signal()
-
-    def __init__(self, ser: serial.Serial):
-        super().__init__()
-        self.ser = ser
-        self._running = True
-
-    def run(self):
-        buf = b""
-        while self._running:
-            try:
-                if self.ser and self.ser.is_open:
-                    data = self.ser.read(self.ser.in_waiting or 1)
-                    if data:
-                        buf += data
-                        while b"\n" in buf:
-                            line, buf = buf.split(b"\n", 1)
-                            text = line.decode("utf-8", errors="replace").strip()
-                            if text:
-                                self.line_received.emit(text)
-                    else:
-                        self.msleep(5)
-                else:
-                    break
-            except serial.SerialException:
-                if self._running:
-                    self.disconnected.emit()
-                break
-            except Exception as e:
-                if self._running:
-                    self.error_occurred.emit(str(e))
-                break
-
-    def stop(self):
-        self._running = False
-        self.wait(2000)
-
-
-# ============================================================================
 #  H7 UART Error Log Parsing
 #  Matches firmware output from Core/Src/motor_uart_dma.c:
 #    [ERROR] <UART> UART error code: 0x00000004
@@ -257,6 +229,112 @@ def _parse_kv_payload(line: str, marker: str) -> dict[str, int] | None:
         except ValueError:
             continue
     return result if result else None
+
+
+def _safe_int(value, default: int = 0) -> int:
+    """Best-effort int conversion used by tolerant telemetry parsers."""
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        try:
+            return int(float(value))
+        except (TypeError, ValueError):
+            return default
+
+
+# -- Protocol-boundary normalization ---------------------------------------
+_LOG_LEVEL_PREFIX = r"(?:\[(?:INFO|WARN|ERROR|DEBUG|BOOT)\]\s+)?"
+_RE_PC_LINK_STATUS = re.compile(
+    rf"^{_LOG_LEVEL_PREFIX}PC_LINK,(?P<payload>[A-Z][A-Z0-9_]*:[^\r\n,]*"
+    rf"(?:,[A-Z][A-Z0-9_]*:[^\r\n,]*)*)\s*$"
+)
+_RE_PC_LINK_EVENT = re.compile(
+    rf"^{_LOG_LEVEL_PREFIX}\[PC_LINK\]\s+(?P<event>TIMEOUT|RECOVERED)"
+    rf"(?:,[^\r\n]*)?\s*$"
+)
+_RE_ARM_RX_RECORD = re.compile(
+    rf"^{_LOG_LEVEL_PREFIX}\[ARM_RX\]\s+(?P<payload>[^\r\n]+?)\s*$"
+)
+_RE_IMU_STREAM_STATUS = re.compile(
+    rf"^{_LOG_LEVEL_PREFIX}IMU_STREAM,EN:(?P<enabled>[01])"
+    rf"(?:,PERIOD_MS:\d+)?,OK:1\s*$"
+)
+_RE_LEADING_ARM = re.compile(r"^(?:arm(?:\s+|$))+", re.IGNORECASE)
+
+
+def _parse_pc_link_status(line: str) -> str | None:
+    """Return ALIVE/TIMEOUT/UNKNOWN for a valid H7 PC-link record.
+
+    The match is deliberately anchored.  A diagnostic or unrelated log line
+    that merely contains ``PC_LINK`` is not accepted.
+    """
+    if not isinstance(line, str):
+        return None
+    record = line.strip()
+    event_match = _RE_PC_LINK_EVENT.fullmatch(record)
+    if event_match:
+        return "TIMEOUT" if event_match.group("event") == "TIMEOUT" else "ALIVE"
+
+    status_match = _RE_PC_LINK_STATUS.fullmatch(record)
+    if not status_match:
+        return None
+    kv: dict[str, int] = {}
+    for item in status_match.group("payload").split(","):
+        key, value = item.split(":", 1)
+        try:
+            kv[key.strip()] = int(value.strip())
+        except ValueError:
+            continue
+    if not kv:
+        return None
+    if kv.get("TIMEOUT", 0):
+        return "TIMEOUT"
+    if kv.get("ALIVE", 0):
+        return "ALIVE"
+    if (kv.get("SEEN", 0) == 0 and kv.get("ALIVE", 0) == 0
+            and kv.get("TIMEOUT", 0) == 0):
+        return "UNKNOWN"
+    return "UNKNOWN"
+
+
+def _extract_arm_rx_payload(line: str) -> str | None:
+    """Extract an F401 payload from one anchored H7 ``[ARM_RX]`` record."""
+    if not isinstance(line, str):
+        return None
+    match = _RE_ARM_RX_RECORD.fullmatch(line.strip())
+    if not match:
+        return None
+    payload = match.group("payload").strip()
+    return payload or None
+
+
+def _parse_imu_stream_status(line: str) -> bool | None:
+    """Return the enabled state from one exact H7 IMU stream record.
+
+    Logger prefixes are accepted, but arbitrary lines containing the words
+    ``IMU_STREAM`` are deliberately rejected.
+    """
+    if not isinstance(line, str):
+        return None
+    match = _RE_IMU_STREAM_STATUS.fullmatch(line.strip())
+    if not match:
+        return None
+    return match.group("enabled") == "1"
+
+
+def _normalize_manipulation_payload(payload: str) -> str | None:
+    """Return an unprefixed, non-empty F401 payload."""
+    if not isinstance(payload, str):
+        return None
+    normalized = payload.strip()
+    normalized = _RE_LEADING_ARM.sub("", normalized).strip()
+    return normalized or None
+
+
+def _format_manipulation_command(payload: str) -> str | None:
+    """Return exactly one H7 ``arm `` prefix plus the F401 payload."""
+    normalized = _normalize_manipulation_payload(payload)
+    return f"arm {normalized}" if normalized else None
 
 
 # ============================================================================
@@ -442,7 +520,7 @@ class MotorSettingsDialog(QDialog):
         self._send_buttons: dict[str, QPushButton] = {}
         for motor in self.MOTOR_TAGS + ("All",):
             btn = QPushButton(f"Send to {motor}")
-            btn.clicked.connect(lambda _=False, m=motor: self._on_send_to(motor))
+            btn.clicked.connect(lambda _=False, m=motor: self._on_send_to(m))
             row.addWidget(btn, 1)
             self._send_buttons[motor] = btn
         return row
@@ -840,6 +918,16 @@ class ImuMagSettingsDialog(QDialog):
         b.clicked.connect(lambda _, c=cmd: self._gui._send_cmd(c))
         return b
 
+    def _action_btn(self, label: str, callback, *, primary=False,
+                    danger=False) -> QPushButton:
+        """Build a button whose action owns protocol-side state changes."""
+        b = QPushButton(label)
+        b.setFixedHeight(34)
+        b.setMinimumWidth(84)
+        b.setStyleSheet(self._bs(primary, danger))
+        b.clicked.connect(callback)
+        return b
+
     def _bs(self, primary=False, danger=False) -> str:
         if primary:
             bg, hov, prs, bd, fg = "#3a6b3f", "#4a8b50", "#2a5b30", "#5a9b60", "#b8f0bb"
@@ -910,8 +998,12 @@ class ImuMagSettingsDialog(QDialog):
     def _build_mpu_read_test_card(self) -> QGroupBox:
         grp, lay = self._card("MPU Read / Test")
         r1 = QHBoxLayout(); r1.setSpacing(8)
-        r1.addWidget(QLabel("Read:")); r1.addWidget(self._btn("Raw", "mpuraw"))
-        r1.addWidget(self._btn("Conv", "mpuconv")); r1.addStretch()
+        r1.addWidget(QLabel("Read:"))
+        r1.addWidget(self._action_btn(
+            "Raw", lambda: self._gui._request_imu_one_shot("mpuraw")))
+        r1.addWidget(self._action_btn(
+            "Conv", lambda: self._gui._request_imu_one_shot("mpuconv")))
+        r1.addStretch()
         lay.addLayout(r1)
         r2 = QHBoxLayout(); r2.setSpacing(8)
         r2.addWidget(QLabel("Test:")); r2.addWidget(self._btn("Config", "mpucfgtest"))
@@ -925,11 +1017,13 @@ class ImuMagSettingsDialog(QDialog):
     def _build_stream_control_card(self) -> QGroupBox:
         grp, lay = self._card("Stream Control")
         r = QHBoxLayout(); r.setSpacing(8)
-        r.addWidget(self._btn("Stream ON", "imu stream on", primary=True))
-        r.addWidget(self._btn("Stream OFF", "imu stream off", danger=True))
-        self._lbl_stream_chip = QLabel("OFF")
+        r.addWidget(self._action_btn(
+            "Stream ON", self._gui._request_imu_stream_on, primary=True))
+        r.addWidget(self._action_btn(
+            "Stream OFF", self._gui._request_imu_stream_off, danger=True))
+        self._lbl_stream_chip = QLabel("UNKNOWN")
         self._lbl_stream_chip.setStyleSheet(self._chip_style(self.C_TEXT_DIM))
-        self._lbl_stream_chip.setFixedWidth(50)
+        self._lbl_stream_chip.setFixedWidth(78)
         self._lbl_stream_chip.setAlignment(Qt.AlignCenter)
         r.addWidget(self._lbl_stream_chip)
         r.addStretch()
@@ -975,8 +1069,10 @@ class ImuMagSettingsDialog(QDialog):
     def _build_mag_controls_card(self) -> QGroupBox:
         grp, lay = self._card("MAG Controls")
         r = QHBoxLayout(); r.setSpacing(8)
-        r.addWidget(self._btn("MAG Raw", "magraw"))
-        r.addWidget(self._btn("MAG µT", "magimu"))
+        r.addWidget(self._action_btn(
+            "MAG Raw", lambda: self._gui._request_mag_one_shot("magraw")))
+        r.addWidget(self._action_btn(
+            "MAG µT", lambda: self._gui._request_mag_one_shot("magimu")))
         r.addWidget(self._btn("MAG Help", "maghelp"))
         r.addStretch()
         lay.addLayout(r)
@@ -1027,7 +1123,10 @@ class ImuMagSettingsDialog(QDialog):
 
     def _init_all(self):
         self._gui._send_cmd("mpuinit")
-        QTimer.singleShot(200, lambda: self._gui._send_cmd("maginit"))
+        sid = self._gui._tcp_session_id
+        QTimer.singleShot(200, lambda sid=sid: (
+            self._gui._send_cmd("maginit") if self._gui._is_current_tcp_session(sid) else None
+        ))
 
     def _set_telper(self):
         self._gui._send_cmd(f"imu telper {self._spin_telper.value()}")
@@ -1050,8 +1149,16 @@ class ImuMagSettingsDialog(QDialog):
 
     def update_stream_status(self, status: str):
         if hasattr(self, '_lbl_stream_chip'):
-            c = self.C_GREEN if status.upper() == "ON" else self.C_TEXT_DIM
-            self._lbl_stream_chip.setText(status.upper())
+            normalized = status.upper()
+            if normalized == "ON":
+                c = self.C_GREEN
+            elif normalized in ("STARTING", "STOPPING"):
+                c = "#e0ad4f"
+            elif normalized == "STALE":
+                c = self.C_RED
+            else:
+                c = self.C_TEXT_DIM
+            self._lbl_stream_chip.setText(normalized)
             self._lbl_stream_chip.setStyleSheet(self._chip_style(c))
 
     def update_gyro_filter_status(self, status: str):
@@ -1065,13 +1172,1044 @@ class ImuMagSettingsDialog(QDialog):
 
 
 # ============================================================================
+#  Manipulation Arm Settings Dialog
+#  Five-tab settings window for the F401 manipulation arm controller.
+#  Commands are built from the dialog fields and sent through the existing
+#  EarendilControlGui._send_cmd() serial path, so logging / disconnected
+#  handling stays consistent with the rest of the GUI.  This dialog only
+#  sends commands when the user explicitly clicks a Send / Test / Action
+#  button; it never sends movement commands automatically on open or close.
+# ============================================================================
+
+class ManipulationArmSettingsDialog(QDialog):
+    """Manipulation Arm Settings dialog (5 tabs).
+
+    Provides editing / sending of manipulation-only F401 settings through
+    the existing ``_send_cmd()`` serial path.  Sections:
+
+        1. Axis Settings       - J1..J6: invert, maxpwm, default, gain, dead, stopmode
+        2. Position Control    - J1..J3: kp, kd, minpwm, tol, min/max angle, limits, brakepoint
+        3. Sensor / AS5600     - J1..J3: AS5600 channel assignment, zero / read actions
+        4. Joystick / Keybind  - J1..J6: keybind forward/back + test buttons
+        5. System / Save       - mode / stop / heartbeat / params / save with confirmation
+
+    The dialog reuses the active theme via ``self._gui._colors()`` so it stays
+    readable in both light and dark themes.  ``params`` parsing is performed
+    by the main GUI (``_arm_parse_params``) and dispatched here through
+    ``apply_params`` whenever the dialog is open.
+    """
+
+    # -- Manipulation joint inventory --------------------------------------
+    ARM_JOINTS = ("J1", "J2", "J3", "J4", "J5", "J6")
+    ARM_JOINT_LABELS = {
+        "J1": "J1 Base",
+        "J2": "J2 Shoulder",
+        "J3": "J3 Elbow",
+        "J4": "J4 Wrist Pitch",
+        "J5": "J5 Wrist Twist",
+        "J6": "J6 Gripper",
+    }
+    # Numeric joint id spoken by the F401 ``set <j> ...`` parser.
+    ARM_JOINT_NUM = {"J1": 1, "J2": 2, "J3": 3, "J4": 4, "J5": 5, "J6": 6}
+    # J1..J3 support position control + AS5600.  J4..J6 do not (by spec).
+    ARM_HAS_POSITION = {"J1": True, "J2": True, "J3": True,
+                        "J4": False, "J5": False, "J6": False}
+    ARM_HAS_AS5600 = ARM_HAS_POSITION
+    # Stop modes available per joint.  J1..J3: coast/brake/hold/hybrid.
+    # J4..J6: coast/brake only - hold/hybrid are not offered unless firmware
+    # explicitly supports them; this keeps the GUI conservative by default.
+    STOPMODES_FULL = ("coast", "brake", "hold", "hybrid")
+    STOPMODES_LIMITED = ("coast", "brake")
+    AS5600_CHANNELS = ("OFF", "0", "1", "2", "3", "4", "5", "6", "7")
+    BRAKEPOINT_OFF = "OFF"
+
+    def __init__(self, main_gui: "EarendilControlGui", parent=None):
+        super().__init__(parent)
+        self._gui = main_gui
+        self.setWindowTitle("Manipulation Arm Settings")
+        self.setMinimumSize(900, 580)
+        self._apply_theme_style()
+
+        # Local "dirty" flag - set True by any field edit, cleared on save
+        # success (OK SAVED_FLASH) or Refresh from params / Save Settings.
+        self._dirty: bool = False
+
+        root = QVBoxLayout(self)
+        root.setSpacing(8)
+        root.setContentsMargins(10, 10, 10, 10)
+
+        # -- Status bar -----------------------------------------------------
+        self._lbl_status = QLabel("")
+        self._lbl_status.setWordWrap(True)
+        self._lbl_status.setStyleSheet(self._muted_style())
+        root.addWidget(self._lbl_status)
+
+        # -- Tabs -----------------------------------------------------------
+        self._tabs = QTabWidget()
+        self._tabs.addTab(self._build_axis_tab(),         "Axis Settings")
+        self._tabs.addTab(self._build_position_tab(),     "Position Control")
+        self._tabs.addTab(self._build_sensor_tab(),       "Sensor / AS5600")
+        self._tabs.addTab(self._build_joystick_tab(),    "Joystick / Keybind")
+        self._tabs.addTab(self._build_system_tab(),       "System / Save")
+        root.addWidget(self._tabs, 1)
+
+        # -- Bottom bar -----------------------------------------------------
+        root.addLayout(self._build_bottom_bar())
+
+        self.set_status("Ready. Edit fields, then Send per row.", None)
+
+    # ======================================================================
+    #  Theme / utility helpers
+    # ======================================================================
+
+    def _apply_theme_style(self):
+        c = self._gui._colors()
+        self.setStyleSheet(f"""
+            QDialog {{
+                background-color: {c['bg_main']};
+                color: {c['text']};
+                font-size: 13px;
+                font-weight: {c['font_weight']};
+            }}
+            QLabel {{ color: {c['text']}; }}
+            QGroupBox {{
+                background-color: {c['bg_panel']};
+                border: 1px solid {c['border']};
+                border-radius: 6px;
+                margin-top: 10px;
+                padding-top: 14px;
+                color: {c['text']};
+                font-weight: bold;
+            }}
+            QGroupBox::title {{
+                subcontrol-origin: margin;
+                left: 12px;
+                padding: 0 6px;
+                color: {c['accent_gold']};
+            }}
+            QPushButton {{
+                background-color: {c['bg_input']};
+                border: 1px solid {c['accent_gold']};
+                border-radius: 5px;
+                padding: 4px 10px;
+                color: {c['accent_gold']};
+                font-weight: bold;
+                min-height: 24px;
+            }}
+            QPushButton:hover {{ background-color: {c['selection_bg']}; }}
+            QPushButton:pressed {{ background-color: {c['pressed_bg']}; }}
+            QPushButton:disabled {{ color: {c['text_muted']};
+                                    border-color: {c['border']}; }}
+            QLineEdit, QSpinBox, QDoubleSpinBox, QComboBox {{
+                background-color: {c['bg_input']};
+                border: 1px solid {c['border']};
+                border-radius: 4px;
+                padding: 3px 6px;
+                color: {c['text']};
+                font-weight: {c['font_weight']};
+            }}
+            QTableWidget {{
+                background-color: {c['bg_table']};
+                border: 1px solid {c['border']};
+                gridline-color: {c['gridline']};
+                color: {c['text']};
+                font-size: 12px;
+            }}
+            QTableWidget::item {{ padding: 2px; }}
+            QHeaderView::section {{
+                background-color: {c['table_header']};
+                color: {c['accent_gold']};
+                border: none;
+                border-right: 1px solid {c['border']};
+                border-bottom: 1px solid {c['border']};
+                padding: 4px;
+                font-weight: bold;
+            }}
+            QTabWidget::pane {{
+                border: 1px solid {c['border']};
+                background-color: {c['bg_main']};
+            }}
+            QTabBar::tab {{
+                background-color: {c['bg_input']};
+                color: {c['text']};
+                border: 1px solid {c['border']};
+                padding: 6px 14px;
+                border-top-left-radius: 4px;
+                border-top-right-radius: 4px;
+            }}
+            QTabBar::tab:selected {{
+                background-color: {c['selection_bg']};
+                color: {c['accent_gold']};
+                border-color: {c['accent_gold']};
+            }}
+            QCheckBox {{ color: {c['text']}; }}
+            QCheckBox::indicator {{
+                width: 14px; height: 14px;
+                border: 1px solid {c['border']};
+                background: {c['bg_input']};
+            }}
+            QCheckBox::indicator:checked {{
+                background: {c['accent_gold']};
+                border-color: {c['accent_gold']};
+            }}
+        """)
+
+    def _muted_style(self) -> str:
+        c = self._gui._colors()
+        return f"color: {c['text_muted']}; font-size: 11px; border: none;"
+
+    def _hint_label(self, text: str) -> QLabel:
+        l = QLabel(text)
+        l.setWordWrap(True)
+        l.setStyleSheet(self._muted_style())
+        return l
+
+    def _btn(self, label: str, *, primary=False, danger=False) -> QPushButton:
+        b = QPushButton(label)
+        c = self._gui._colors()
+        bg = c["bg_input"]
+        hov = c["selection_bg"]
+        prs = c["pressed_bg"]
+        bd = c["accent_gold"]
+        fg = c["accent_gold"]
+        if primary:
+            bg = c.get("success", "#1e6e3e")
+            bd = c.get("success_bright", "#3CB371")
+            fg = c.get("success_bright", "#3CB371")
+        elif danger:
+            bd = c["danger_bright"]
+            fg = c["danger_bright"]
+        b.setStyleSheet(
+            f"QPushButton {{ background-color: {bg}; border: 1px solid {bd};"
+            f" border-radius: 5px; padding: 4px 10px; color: {fg};"
+            f" font-weight: bold; min-height: 24px; }}"
+            f" QPushButton:hover {{ background-color: {hov}; }}"
+            f" QPushButton:pressed {{ background-color: {prs}; }}"
+        )
+        return b
+
+    def _mark_dirty(self, *_):
+        """Mark local settings as edited / unsaved and update the status hint."""
+        if not self._dirty:
+            self._dirty = True
+            c = self._gui._colors()
+            self._lbl_status.setStyleSheet(
+                f"color: {c['warning']}; font-size: 11px; border: none;")
+            self.set_status("\u26A0 RAM settings edited but not saved.", "warn")
+
+    def set_status(self, text: str, level: str | None = None):
+        """Update the dialog status label.
+
+        level: None (muted), "warn" (warning), "err" (error),
+               "ok" (success), "dirty" (visible dir
+ 
+        Also drives the local dirty flag visibility for the operator.
+        """
+        c = self._gui._colors()
+        if level == "warn":
+            color = c["warning"]
+        elif level == "err":
+            color = c["danger_bright"]
+        elif level == "ok":
+            color = c["success_bright"]
+        else:
+            color = c["text_muted"]
+        self._lbl_status.setText(text)
+        self._lbl_status.setStyleSheet(
+            f"color: {color}; font-size: 11px; border: none;")
+
+    def clear_dirty(self):
+        """Mark local settings as saved / clean."""
+        self._dirty = False
+        self.set_status("Settings saved to flash.", "ok")
+
+    def is_dirty(self) -> bool:
+        return self._dirty
+
+    # ======================================================================
+    #  SECTION 1 - Axis Settings tab
+    # ======================================================================
+
+    def _build_axis_tab(self) -> QWidget:
+        tab = QWidget()
+        lay = QVBoxLayout(tab)
+        lay.setSpacing(6)
+        lay.setContentsMargins(8, 8, 8, 8)
+
+        headers = ["Axis", "Invert", "MaxPWM", "DefaultPWM",
+                   "PosGain", "NegGain", "Dead", "StopMode", "Send"]
+        self._axis_table = QTableWidget(len(self.ARM_JOINTS), len(headers))
+        self._axis_table.setHorizontalHeaderLabels(headers)
+        self._axis_table.verticalHeader().setVisible(False)
+        h = self._axis_table.horizontalHeader()
+        if h:
+            h.setSectionResizeMode(0, QHeaderView.Stretch)
+            for col in range(1, len(headers) - 1):
+                h.setSectionResizeMode(col, QHeaderView.ResizeToContents)
+            h.setSectionResizeMode(len(headers) - 1, QHeaderView.ResizeToContents)
+
+        self._axis_widgets: dict[str, dict] = {}
+        for row, joint in enumerate(self.ARM_JOINTS):
+            self._axis_table.setCellWidget(row, 0, self._static_label(self.ARM_JOINT_LABELS[joint]))
+
+            w_invert = QCheckBox()
+            w_invert.stateChanged.connect(self._mark_dirty)
+            self._axis_table.setCellWidget(row, 1, w_invert)
+
+            w_maxpwm = self._make_spin(0, 255, 200)
+            w_default = self._make_spin(0, 255, 100)
+            w_posgain = self._make_spin(100, 3000, 1000)
+            w_neggain = self._make_spin(100, 3000, 1000)
+            w_dead = self._make_spin(0, 400, 50)
+            self._axis_table.setCellWidget(row, 2, w_maxpwm)
+            self._axis_table.setCellWidget(row, 3, w_default)
+            self._axis_table.setCellWidget(row, 4, w_posgain)
+            self._axis_table.setCellWidget(row, 5, w_neggain)
+            self._axis_table.setCellWidget(row, 6, w_dead)
+
+            stop_modes = (self.STOPMODES_FULL if joint in ("J1", "J2", "J3")
+                          else self.STOPMODES_LIMITED)
+            w_stopmode = QComboBox()
+            w_stopmode.addItems(stop_modes)
+            w_stopmode.setCurrentIndex(0)
+            w_stopmode.currentIndexChanged.connect(self._mark_dirty)
+            self._axis_table.setCellWidget(row, 7, w_stopmode)
+
+            btn = self._btn("Send")
+            btn.clicked.connect(lambda _=False, j=joint: self._send_axis_row(j))
+            self._axis_table.setCellWidget(row, 8, btn)
+
+            self._axis_widgets[joint] = {
+                "invert":   w_invert,
+                "maxpwm":   w_maxpwm,
+                "default":  w_default,
+                "posgain":  w_posgain,
+                "neggain":  w_neggain,
+                "dead":     w_dead,
+                "stopmode": w_stopmode,
+            }
+
+        lay.addWidget(self._axis_table)
+
+        row = QHBoxLayout()
+        b_all = self._btn("Send All Axis Settings", primary=True)
+        b_all.clicked.connect(self._send_all_axis)
+        b_refresh = self._btn("Refresh from params")
+        b_refresh.clicked.connect(self._refresh_params)
+        row.addWidget(b_all)
+        row.addWidget(b_refresh)
+        row.addStretch()
+        lay.addLayout(row)
+        lay.addWidget(self._hint_label(
+            "Sends one ``set <j> <field> <value>`` F401 command per changed "
+            "field through _send_cmd().  J1..J3 may use hold/hybrid; "
+            "J4..J6 expose coast/brake only by default."))
+        return tab
+
+    def _send_axis_row(self, joint: str):
+        """Send the changed / current row fields as ``set <j> ...`` commands."""
+        w = self._axis_widgets.get(joint)
+        if not w:
+            return
+        n = self.ARM_JOINT_NUM[joint]
+        cmds = [
+            f"set {n} invert {1 if w['invert'].isChecked() else 0}",
+            f"set {n} maxpwm {w['maxpwm'].value()}",
+            f"set {n} default {w['default'].value()}",
+            f"set {n} posgain {w['posgain'].value()}",
+            f"set {n} neggain {w['neggain'].value()}",
+            f"set {n} dead {w['dead'].value()}",
+            f"set {n} stopmode {w['stopmode'].currentText()}",
+        ]
+        self._gui.send_arm_setting_sequence(cmds)
+        self._mark_dirty()
+
+    def _send_all_axis(self):
+        for joint in self.ARM_JOINTS:
+            self._send_axis_row(joint)
+
+    def _refresh_params(self):
+        """Send ``params`` to request full F401 settings dump."""
+        self._gui.send_arm_setting_command("params")
+
+    # ======================================================================
+    #  SECTION 2 - Position Control tab (J1..J3)
+    # ======================================================================
+
+    def _build_position_tab(self) -> QWidget:
+        tab = QWidget()
+        lay = QVBoxLayout(tab)
+        lay.setSpacing(6)
+        lay.setContentsMargins(8, 8, 8, 8)
+
+        position_joints = ("J1", "J2", "J3")
+        headers = ["Axis", "KP", "KD", "MinPWM", "TolDeg",
+                   "MinAngle", "MaxAngle", "Limits", "Brakepoint", "Send"]
+        self._pos_table = QTableWidget(len(position_joints), len(headers))
+        self._pos_table.setHorizontalHeaderLabels(headers)
+        self._pos_table.verticalHeader().setVisible(False)
+        h = self._pos_table.horizontalHeader()
+        if h:
+            h.setSectionResizeMode(0, QHeaderView.Stretch)
+            for col in range(1, len(headers)):
+                h.setSectionResizeMode(col, QHeaderView.ResizeToContents)
+
+        self._pos_widgets: dict[str, dict] = {}
+        for row, joint in enumerate(position_joints):
+            self._pos_table.setCellWidget(row, 0,
+                                          self._static_label(self.ARM_JOINT_LABELS[joint]))
+            w_kp = self._make_spin(0, 10000, 800)
+            w_kd = self._make_spin(0, 10000, 40)
+            w_minpwm = self._make_spin(0, 255, 60)
+            w_tol = self._make_dspin(0.1, 20.0, 2.0, 1)
+            w_min = self._make_dspin(-360.0, 360.0, -90.0, 1)
+            w_max = self._make_dspin(-360.0, 360.0, 90.0, 1)
+            w_limits = QCheckBox()
+            w_limits.setChecked(True)
+            w_limits.stateChanged.connect(self._mark_dirty)
+            w_bp = QLineEdit()
+            w_bp.setPlaceholderText("angle or OFF")
+            w_bp.setFixedWidth(80)
+            w_bp.textEdited.connect(self._mark_dirty)
+            self._pos_table.setCellWidget(row, 1, w_kp)
+            self._pos_table.setCellWidget(row, 2, w_kd)
+            self._pos_table.setCellWidget(row, 3, w_minpwm)
+            self._pos_table.setCellWidget(row, 4, w_tol)
+            self._pos_table.setCellWidget(row, 5, w_min)
+            self._pos_table.setCellWidget(row, 6, w_max)
+            self._pos_table.setCellWidget(row, 7, w_limits)
+            self._pos_table.setCellWidget(row, 8, w_bp)
+
+            btn = self._btn("Send")
+            btn.clicked.connect(lambda _=False, j=joint: self._send_pos_row(j))
+            self._pos_table.setCellWidget(row, 9, btn)
+
+            self._pos_widgets[joint] = {
+                "kp":         w_kp,
+                "kd":         w_kd,
+                "minpwm":     w_minpwm,
+                "tol":        w_tol,
+                "min":        w_min,
+                "max":        w_max,
+                "limits":     w_limits,
+                "brakepoint": w_bp,
+            }
+
+        lay.addWidget(self._pos_table)
+
+        # -- Quick action row per J1..J3 ------------------------------------
+        lay.addWidget(self._hint_label(
+            "Quick actions (per axis): Zero - zero, Goto - move to absolute "
+            "angle, Rotate - move by relative angle, Stop - halt one axis."))
+        self._pos_quick: dict[str, dict] = {}
+        for joint in position_joints:
+            r = QHBoxLayout()
+            r.setSpacing(4)
+            lbl = QLabel(self.ARM_JOINT_LABELS[joint])
+            lbl.setMinimumWidth(110)
+            r.addWidget(lbl)
+
+            b_zero = self._btn("Zero")
+            b_zero.clicked.connect(lambda _=False, j=joint: self._quick_zero(j))
+            r.addWidget(b_zero)
+
+            r.addWidget(QLabel("Goto:"))
+            sp_goto = self._make_dspin(-360.0, 360.0, 0.0, 1)
+            r.addWidget(sp_goto)
+            b_goto = self._btn("Goto", primary=True)
+            b_goto.clicked.connect(lambda _=False, j=joint, s=sp_goto:
+                                   self._quick_goto(j, s.value()))
+            r.addWidget(b_goto)
+
+            r.addWidget(QLabel("Rotate:"))
+            sp_rot = self._make_dspin(-360.0, 360.0, 0.0, 1)
+            r.addWidget(sp_rot)
+            b_rot = self._btn("Rotate")
+            b_rot.clicked.connect(lambda _=False, j=joint, s=sp_rot:
+                                  self._quick_rotate(j, s.value()))
+            r.addWidget(b_rot)
+
+            b_stop = self._btn("Stop", danger=True)
+            b_stop.clicked.connect(lambda _=False, j=joint: self._quick_stop(j))
+            r.addWidget(b_stop)
+
+            r.addStretch()
+            lay.addLayout(r)
+            self._pos_quick[joint] = {"goto_spin": sp_goto, "rot_spin": sp_rot}
+        return tab
+
+    def _send_pos_row(self, joint: str):
+        """Send ``set <j> ...`` position control fields."""
+        w = self._pos_widgets.get(joint)
+        if not w:
+            return
+        n = self.ARM_JOINT_NUM[joint]
+        bp_txt = w["brakepoint"].text().strip()
+        if bp_txt.upper() == self.BRAKEPOINT_OFF:
+            bp_cmd = f"set {n} brakepoint off"
+        else:
+            try:
+                bp_val = float(bp_txt)
+                bp_cmd = f"set {n} brakepoint {bp_val:g}"
+            except ValueError:
+                bp_cmd = f"set {n} brakepoint off"
+        cmds = [
+            f"set {n} kp {w['kp'].value()}",
+            f"set {n} kd {w['kd'].value()}",
+            f"set {n} minpwm {w['minpwm'].value()}",
+            f"set {n} tolerance {w['tol'].value():g}",
+            f"set {n} minangle {w['min'].value():g}",
+            f"set {n} maxangle {w['max'].value():g}",
+            f"set {n} limits {1 if w['limits'].isChecked() else 0}",
+            bp_cmd,
+        ]
+        self._gui.send_arm_setting_sequence(cmds)
+        self._mark_dirty()
+
+    def _quick_zero(self, joint: str):
+        """Send ``zero <j>``; also clears target telemetry if tracked."""
+        cmd = f"zero {joint}"
+        self._gui.send_arm_setting_command(cmd)
+
+    def _quick_goto(self, joint: str, angle: float):
+        """Send ``goto <J> <angle>`` and update telemetry target if tracked."""
+        if not self.ARM_HAS_POSITION[joint]:
+            return
+        cmd = f"goto {joint} {angle:g}"
+        self._gui.send_arm_setting_command(cmd)
+
+    def _quick_rotate(self, joint: str, angle: float):
+        """Send ``rotate <J> <angle>`` and update telemetry target if tracked."""
+        if not self.ARM_HAS_POSITION[joint]:
+            return
+        cmd = f"rotate {joint} {angle:g}"
+        self._gui.send_arm_setting_command(cmd)
+
+    def _quick_stop(self, joint: str):
+        """Send ``stop <J>`` and clear target telemetry state."""
+        cmd = f"stop {joint}"
+        self._gui.send_arm_setting_command(cmd)
+
+    # ======================================================================
+    #  SECTION 3 - Sensor / AS5600 tab (J1..J3)
+    # ======================================================================
+
+    def _build_sensor_tab(self) -> QWidget:
+        tab = QWidget()
+        lay = QVBoxLayout(tab)
+        lay.setSpacing(6)
+        lay.setContentsMargins(8, 8, 8, 8)
+
+        sensor_joints = ("J1", "J2", "J3")
+        headers = ["Axis", "AS5600 CH", "Sensor", "Zero", "Read"]
+        self._sensor_table = QTableWidget(len(sensor_joints), len(headers))
+        self._sensor_table.setHorizontalHeaderLabels(headers)
+        self._sensor_table.verticalHeader().setVisible(False)
+        h = self._sensor_table.horizontalHeader()
+        if h:
+            h.setSectionResizeMode(0, QHeaderView.Stretch)
+            h.setSectionResizeMode(1, QHeaderView.ResizeToContents)
+            h.setSectionResizeMode(2, QHeaderView.Stretch)
+            h.setSectionResizeMode(3, QHeaderView.ResizeToContents)
+            h.setSectionResizeMode(4, QHeaderView.ResizeToContents)
+
+        self._sensor_widgets: dict[str, dict] = {}
+        for row, joint in enumerate(sensor_joints):
+            self._sensor_table.setCellWidget(row, 0,
+                                             self._static_label(self.ARM_JOINT_LABELS[joint]))
+            w_ch = QComboBox()
+            w_ch.addItems(self.AS5600_CHANNELS)
+            w_ch.setCurrentIndex(0)
+            w_ch.currentIndexChanged.connect(self._mark_dirty)
+            self._sensor_table.setCellWidget(row, 1, w_ch)
+
+            w_status = self._static_label("\u2014")
+            self._sensor_table.setCellWidget(row, 2, w_status)
+
+            b_zero = self._btn("Zero")
+            b_zero.clicked.connect(lambda _=False, j=joint: self._quick_zero(j))
+            self._sensor_table.setCellWidget(row, 3, b_zero)
+
+            b_read = self._btn("Read")
+            b_read.clicked.connect(lambda _=False, j=joint: self._gui.send_arm_setting_command("get sensors"))
+            self._sensor_table.setCellWidget(row, 4, b_read)
+
+            self._sensor_widgets[joint] = {"ch": w_ch, "status": w_status}
+
+        lay.addWidget(self._sensor_table)
+
+        # -- Send row for AS5600 channel assignment --------------------------
+        r_send = QHBoxLayout()
+        r_send.addWidget(QLabel("Set AS5600 channel for:"))
+        self._sensor_as5600_joint = QComboBox()
+        self._sensor_as5600_joint.addItems([self.ARM_JOINT_LABELS[j] for j in sensor_joints])
+        r_send.addWidget(self._sensor_as5600_joint)
+        b_apply = self._btn("Set AS5600", primary=True)
+        b_apply.clicked.connect(self._send_as5600_channel)
+        r_send.addWidget(b_apply)
+        r_send.addStretch()
+        lay.addLayout(r_send)
+
+        # -- Global AS5600 buttons ------------------------------------------
+        r_glb = QHBoxLayout()
+        b_get = self._btn("Get Sensors")
+        b_get.clicked.connect(lambda: self._gui.send_arm_setting_command("get sensors"))
+        b_scan = self._btn("Scan AS5600")
+        b_scan.clicked.connect(lambda: self._gui.send_arm_setting_command("get as5600"))
+        b_off = self._btn("Stream Off", danger=True)
+        b_off.clicked.connect(lambda: self._gui.send_arm_setting_command("stream off"))
+        r_glb.addWidget(b_get)
+        r_glb.addWidget(b_scan)
+        r_glb.addWidget(b_off)
+        r_glb.addStretch()
+        lay.addLayout(r_glb)
+
+        lay.addWidget(self._hint_label(
+            "AS5600 channel uses ``set <j> as5600 <channel>`` (0..7) or "
+            "``set <j> as5600 -1`` for OFF.  Continuous ``stream as5600`` is "
+            "not enabled by default - the GUI already polls via the existing "
+            "Manipulation Arm Telemetry polling."))
+        return tab
+
+    def _send_as5600_channel(self):
+        label = self._sensor_as5600_joint.currentText()
+        joint = next((j for j, l in self.ARM_JOINT_LABELS.items() if l == label),
+                     None)
+        if not joint or joint not in self._sensor_widgets:
+            return
+        n = self.ARM_JOINT_NUM[joint]
+        ch_txt = self._sensor_widgets[joint]["ch"].currentText()
+        if ch_txt == "OFF":
+            self._gui.send_arm_setting_command(f"set {n} as5600 -1")
+        else:
+            self._gui.send_arm_setting_command(f"set {n} as5600 {ch_txt}")
+        self._mark_dirty()
+
+    def update_sensor_status(self, joint: str, text: str):
+        """Called from the main GUI when sensor telemetry updates."""
+        if joint in self._sensor_widgets:
+            self._sensor_widgets[joint]["status"].setText(text)
+
+    # ======================================================================
+    #  SECTION 4 - Joystick / Keybind tab (J1..J6)
+    # ======================================================================
+
+    def _build_joystick_tab(self) -> QWidget:
+        tab = QWidget()
+        lay = QVBoxLayout(tab)
+        lay.setSpacing(6)
+        lay.setContentsMargins(8, 8, 8, 8)
+
+        headers = ["Axis", "KeyFwd", "KeyBack",
+                   "Test Fwd", "Test Back", "Stop"]
+        self._keybind_table = QTableWidget(len(self.ARM_JOINTS), len(headers))
+        self._keybind_table.setHorizontalHeaderLabels(headers)
+        self._keybind_table.verticalHeader().setVisible(False)
+        h = self._keybind_table.horizontalHeader()
+        if h:
+            h.setSectionResizeMode(0, QHeaderView.Stretch)
+            for col in range(1, len(headers)):
+                h.setSectionResizeMode(col, QHeaderView.ResizeToContents)
+
+        self._keybind_widgets: dict[str, dict] = {}
+        # Track toggle state for the Test buttons (per-joint). Each Test
+        # button alternates ``joy button <id> 1`` / ``joy button <id> 0``.
+        self._keybind_test_state: dict[str, dict[str, int]] = {
+            j: {"fwd": 0, "back": 0} for j in self.ARM_JOINTS
+        }
+        for row, joint in enumerate(self.ARM_JOINTS):
+            self._keybind_table.setCellWidget(row, 0,
+                                              self._static_label(self.ARM_JOINT_LABELS[joint]))
+
+            w_fwd = self._make_spin(-1, 32767, -1)
+            w_back = self._make_spin(-1, 32767, -1)
+            w_fwd.setSpecialValueText("-1 (none)")
+            w_back.setSpecialValueText("-1 (none)")
+            self._keybind_table.setCellWidget(row, 1, w_fwd)
+            self._keybind_table.setCellWidget(row, 2, w_back)
+
+            b_fwd = self._btn("Test Fwd")
+            b_fwd.setCheckable(True)
+            b_fwd.clicked.connect(lambda _=False, j=joint: self._test_key(j, "fwd"))
+            self._keybind_table.setCellWidget(row, 3, b_fwd)
+
+            b_back = self._btn("Test Back")
+            b_back.setCheckable(True)
+            b_back.clicked.connect(lambda _=False, j=joint: self._test_key(j, "back"))
+            self._keybind_table.setCellWidget(row, 4, b_back)
+
+            b_stop = self._btn("Stop", danger=True)
+            b_stop.clicked.connect(lambda _=False, j=joint: self._quick_stop(j))
+            self._keybind_table.setCellWidget(row, 5, b_stop)
+
+            self._keybind_widgets[joint] = {"fwd": w_fwd, "back": w_back}
+
+        lay.addWidget(self._keybind_table)
+
+        # -- Set keybind row ------------------------------------------------
+        r_set = QHBoxLayout()
+        b_setkey = self._btn("Send All Keybinds", primary=True)
+        b_setkey.clicked.connect(self._send_all_keybinds)
+        b_refresh = self._btn("Refresh from params")
+        b_refresh.clicked.connect(self._refresh_params)
+        r_set.addWidget(b_setkey)
+        r_set.addWidget(b_refresh)
+        r_set.addStretch()
+        lay.addLayout(r_set)
+
+        lay.addWidget(self._hint_label(
+            "Joystick commands only move the arm in ARM mode.  "
+            "Send keybind: ``set <j> keybind <id>`` / ``set <j> negkeybind "
+            "<id>`` (-1 disables).  Test buttons alternate "
+            "``joy button <id> 1`` then ``joy button <id> 0``."))
+        return tab
+
+    def _send_all_keybinds(self):
+        for joint in self.ARM_JOINTS:
+            w = self._keybind_widgets[joint]
+            n = self.ARM_JOINT_NUM[joint]
+            fwd = w["fwd"].value()
+            back = w["back"].value()
+            self._gui.send_arm_setting_command(f"set {n} keybind {fwd}")
+            self._gui.send_arm_setting_command(f"set {n} negkeybind {back}")
+        self._mark_dirty()
+
+    def _test_key(self, joint: str, which: str):
+        """Toggle the ``joy button`` test for the joint."""
+        w = self._keybind_widgets.get(joint)
+        if not w:
+            return
+        btn_id = w[which].value()
+        if btn_id < 0:
+            self.set_status(
+                f"Cannot test {joint} {which}: KeyFwd/KeyBack is -1 (none).",
+                "warn")
+            return
+        state = self._keybind_test_state[joint][which]
+        new_state = 0 if state == 1 else 1
+        self._keybind_test_state[joint][which] = new_state
+        self._gui.send_arm_setting_command(f"joy button {btn_id} {new_state}")
+
+    # ======================================================================
+    #  SECTION 5 - System / Save tab
+    # ======================================================================
+
+    def _build_system_tab(self) -> QWidget:
+        tab = QWidget()
+        lay = QVBoxLayout(tab)
+        lay.setSpacing(8)
+        lay.setContentsMargins(8, 8, 8, 8)
+
+        # -- Mode & safety block --------------------------------------------
+        grp_mode = QGroupBox("Mode & Stop")
+        gm = QVBoxLayout(grp_mode)
+        gm.setSpacing(6)
+        gm.setContentsMargins(10, 14, 10, 10)
+        r1 = QHBoxLayout()
+        b_arm = self._btn("Mode ARM Confirm", primary=True)
+        b_arm.clicked.connect(lambda: self._gui.send_arm_setting_command("mode arm confirm"))
+        b_safe = self._btn("Mode SAFE", danger=True)
+        b_safe.clicked.connect(lambda: self._gui.send_arm_setting_command("mode safe"))
+        r1.addWidget(b_arm)
+        r1.addWidget(b_safe)
+        r1.addStretch()
+        gm.addLayout(r1)
+        r2 = QHBoxLayout()
+        b_stop = self._btn("Stop", danger=True)
+        b_stop.clicked.connect(lambda: self._gui.send_arm_setting_command("stop"))
+        b_stopall = self._btn("Stop All", danger=True)
+        b_stopall.clicked.connect(lambda: self._gui.send_arm_setting_command("stopall"))
+        b_hb = self._btn("Heartbeat")
+        b_hb.clicked.connect(lambda: self._gui.send_arm_setting_command("heartbeat"))
+        r2.addWidget(b_stop)
+        r2.addWidget(b_stopall)
+        r2.addWidget(b_hb)
+        r2.addStretch()
+        gm.addLayout(r2)
+        lay.addWidget(grp_mode)
+
+        # -- Diagnostic block ------------------------------------------------
+        grp_diag = QGroupBox("Diagnostics")
+        gd = QVBoxLayout(grp_diag)
+        gd.setSpacing(6)
+        gd.setContentsMargins(10, 14, 10, 10)
+        r3 = QHBoxLayout()
+        b_mode = self._btn("Get Mode")
+        b_mode.clicked.connect(lambda: self._gui.send_arm_setting_command("get mode"))
+        b_fault = self._btn("Get Fault")
+        b_fault.clicked.connect(lambda: self._gui.send_arm_setting_command("get fault"))
+        b_params = self._btn("Refresh Params")
+        b_params.clicked.connect(self._refresh_params)
+        r3.addWidget(b_mode)
+        r3.addWidget(b_fault)
+        r3.addWidget(b_params)
+        r3.addStretch()
+        gd.addLayout(r3)
+        lay.addWidget(grp_diag)
+
+        # -- Save block -----------------------------------------------------
+        grp_save = QGroupBox("Save")
+        gs = QVBoxLayout(grp_save)
+        gs.setSpacing(6)
+        gs.setContentsMargins(10, 14, 10, 10)
+        b_save = self._btn("Save Settings", primary=True)
+        b_save.clicked.connect(self._save_settings)
+        gs.addWidget(b_save)
+        gs.addWidget(self._hint_label(
+            "Save requires SAFE mode and all motors stopped.  Clicking Save "
+            "sends: stopall, then mode safe, then save."))
+        lay.addWidget(grp_save)
+
+        # -- Heartbeat timeout block ----------------------------------------
+        grp_hb = QGroupBox("Heartbeat Timeout")
+        gh = QVBoxLayout(grp_hb)
+        gh.setSpacing(6)
+        gh.setContentsMargins(10, 14, 10, 10)
+        rh = QHBoxLayout()
+        rh.addWidget(QLabel("Timeout (ms):"))
+        self._spin_heartbeat = self._make_spin(0, 60000, 1000)
+        rh.addWidget(self._spin_heartbeat)
+        b_hb_set = self._btn("Send", primary=True)
+        b_hb_set.clicked.connect(self._send_heartbeat)
+        rh.addWidget(b_hb_set)
+        rh.addStretch()
+        gh.addLayout(rh)
+        lay.addWidget(grp_hb)
+
+        lay.addStretch()
+        return tab
+
+    def _send_heartbeat(self):
+        self._gui.send_arm_setting_command(
+            f"set heartbeat {self._spin_heartbeat.value()}")
+        self._mark_dirty()
+
+    def _save_settings(self):
+        """Confirm and send the safe save sequence.
+
+        Sends ``stopall`` -> ``mode safe`` -> ``save`` with a small delay so
+        the F401 firmware has time to honour each precondition.  The dialog
+        status hint reflects save success / failure once the F401 replies.
+        """
+        c = self._gui._colors()
+        msg = QMessageBox(self)
+        msg.setIcon(QMessageBox.Question)
+        msg.setWindowTitle("Save Settings")
+        msg.setText("Save settings to F401 flash?")
+        msg.setInformativeText(
+            "Saving requires SAFE mode and all motors stopped. "
+            "The GUI will send:\n"
+            "  1. stopall\n"
+            "  2. mode safe\n"
+            "  3. save\n\n"
+            "Continue?")
+        msg.setStandardButtons(QMessageBox.Yes | QMessageBox.No)
+        msg.setDefaultButton(QMessageBox.No)
+        msg.setStyleSheet(self.styleSheet())
+        if msg.exec() != QMessageBox.Yes:
+            self.set_status("Save cancelled by user.", None)
+            return
+        self.set_status("Saving: stopping all motors...", "warn")
+        self._gui.send_arm_setting_sequence(
+            ["stopall", "mode safe", "save"], interval_ms=250)
+
+    # ======================================================================
+    #  Bottom bar
+    # ======================================================================
+
+    def _build_bottom_bar(self) -> QHBoxLayout:
+        bar = QHBoxLayout()
+        bar.setSpacing(8)
+        b_refresh = self._btn("Refresh Params")
+        b_refresh.clicked.connect(self._refresh_params)
+        b_save = self._btn("Save Settings", primary=True)
+        b_save.clicked.connect(self._save_settings)
+        b_close = self._btn("Close")
+        b_close.clicked.connect(self.close)
+        bar.addWidget(b_refresh)
+        bar.addWidget(b_save)
+        bar.addStretch()
+        bar.addWidget(b_close)
+        return bar
+
+    # ======================================================================
+    #  Public API used by the main GUI (params / save result / dirty hints)
+    # ======================================================================
+
+    def apply_params(self, params: dict[str, dict]):
+        """Populate dialog fields from a parsed params dict.
+
+        ``params`` is keyed by joint ("J1".."J6") and each value is a dict of
+        the parsed KEY=VALUE pairs (strings).  Unknown / missing keys are
+        ignored silently so a partial or extended F401 output cannot crash
+        the dialog.  Per-joint dicts that are entirely missing are skipped.
+        """
+        for joint in self.ARM_JOINTS:
+            jpr = params.get(joint)
+            if not jpr:
+                continue
+            # Axis table
+            aw = self._axis_widgets.get(joint)
+            if aw:
+                if "INVERT" in jpr:
+                    try:
+                        aw["invert"].setChecked(int(jpr["INVERT"]) != 0)
+                    except (TypeError, ValueError):
+                        pass
+                if "MAXPWM" in jpr:
+                    self._safe_set_spin(aw["maxpwm"], jpr["MAXPWM"])
+                if "DEFAULT" in jpr:
+                    self._safe_set_spin(aw["default"], jpr["DEFAULT"])
+                if "POSGAIN" in jpr:
+                    self._safe_set_spin(aw["posgain"], jpr["POSGAIN"])
+                if "NEGGAIN" in jpr:
+                    self._safe_set_spin(aw["neggain"], jpr["NEGGAIN"])
+                if "DEAD" in jpr:
+                    self._safe_set_spin(aw["dead"], jpr["DEAD"])
+                if "STOPMODE" in jpr:
+                    idx = aw["stopmode"].findText(jpr["STOPMODE"].lower(),
+                                                  Qt.MatchFixedString)
+                    if idx >= 0:
+                        aw["stopmode"].setCurrentIndex(idx)
+            # Position table - J1..J3
+            pw = self._pos_widgets.get(joint)
+            if pw:
+                if "KP" in jpr:
+                    self._safe_set_spin(pw["kp"], jpr["KP"])
+                if "KD" in jpr:
+                    self._safe_set_spin(pw["kd"], jpr["KD"])
+                if "MINPWM" in jpr:
+                    self._safe_set_spin(pw["minpwm"], jpr["MINPWM"])
+                if "TOL" in jpr:
+                    try:
+                        pw["tol"].setValue(float(jpr["TOL"]))
+                    except (TypeError, ValueError):
+                        pass
+                if "MIN" in jpr:
+                    try:
+                        pw["min"].setValue(float(jpr["MIN"]))
+                    except (TypeError, ValueError):
+                        pass
+                if "MAX" in jpr:
+                    try:
+                        pw["max"].setValue(float(jpr["MAX"]))
+                    except (TypeError, ValueError):
+                        pass
+                if "LIMITS" in jpr:
+                    try:
+                        pw["limits"].setChecked(int(jpr["LIMITS"]) != 0)
+                    except (TypeError, ValueError):
+                        pass
+                if "BRAKEPOINT" in jpr:
+                    val = jpr["BRAKEPOINT"]
+                    if isinstance(val, str) and val.upper() in ("OFF", "-1"):
+                        pw["brakepoint"].setText(self.BRAKEPOINT_OFF)
+                    else:
+                        try:
+                            pw["brakepoint"].setText(f"{float(val):g}")
+                        except (TypeError, ValueError):
+                            pw["brakepoint"].setText(str(val))
+            # AS5600 table - J1..J3
+            sw = self._sensor_widgets.get(joint)
+            if sw and "AS5600" in jpr:
+                val = jpr["AS5600"]
+                try:
+                    ch = int(val)
+                    txt = "OFF" if ch < 0 else str(ch)
+                except (TypeError, ValueError):
+                    txt = "OFF"
+                idx = sw["ch"].findText(txt)
+                if idx >= 0:
+                    sw["ch"].setCurrentIndex(idx)
+            # Keybind table - J1..J6
+            kw = self._keybind_widgets.get(joint)
+            if kw:
+                if "KEYFWD" in jpr:
+                    self._safe_set_spin(kw["fwd"], jpr["KEYFWD"])
+                if "KEYBACK" in jpr:
+                    self._safe_set_spin(kw["back"], jpr["KEYBACK"])
+        # Newly refreshed from params: not considered dirty.
+        self._dirty = False
+        self.set_status("Refreshed from params.", None)
+
+    def notify_save_success(self):
+        """Called when the F401 reports ``OK SAVED_FLASH``."""
+        self.clear_dirty()
+
+    def notify_save_failure(self, err_text: str):
+        """Called when the F401 reports a save error."""
+        c = self._gui._colors()
+        self._lbl_status.setStyleSheet(
+            f"color: {c['danger_bright']}; font-size: 11px; border: none;")
+        self.set_status(f"Save failed: {err_text}", "err")
+
+    def notify_settings_dirty(self):
+        """Called when the F401 fault report indicates SETTINGS_DIRTY=1."""
+        c = self._gui._colors()
+        self._lbl_status.setStyleSheet(
+            f"color: {c['warning']}; font-size: 11px; border: none;")
+        self.set_status("\u26A0 RAM settings not saved (SETTINGS_DIRTY=1).",
+                        "warn")
+
+    # ======================================================================
+    #  Small widget factory helpers
+    # ======================================================================
+
+    def _static_label(self, text: str) -> QLabel:
+        l = QLabel(text)
+        l.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
+        return l
+
+    def _make_spin(self, mn: int, mx: int, val: int) -> QSpinBox:
+        s = QSpinBox()
+        s.setRange(mn, mx)
+        s.setValue(val)
+        s.setFixedWidth(80)
+        s.setAlignment(Qt.AlignCenter)
+        s.valueChanged.connect(self._mark_dirty)
+        return s
+
+    def _make_dspin(self, mn: float, mx: float, val: float,
+                    decimals: int = 1) -> QDoubleSpinBox:
+        s = QDoubleSpinBox()
+        s.setRange(mn, mx)
+        s.setDecimals(decimals)
+        s.setValue(val)
+        s.setFixedWidth(80)
+        s.setAlignment(Qt.AlignCenter)
+        s.setSingleStep(1.0)
+        s.valueChanged.connect(self._mark_dirty)
+        return s
+
+    @staticmethod
+    def _safe_set_spin(spin, value):
+        """Set a QSpinBox/QDoubleSpinBox from a string without raising.
+
+        Silently ignores invalid values so a malformed params line cannot
+        crash the dialog.
+        """
+        try:
+            if isinstance(spin, QDoubleSpinBox):
+                spin.setValue(float(value))
+            else:
+                spin.setValue(int(float(value)))
+        except (TypeError, ValueError):
+            pass
+
+    def closeEvent(self, event):
+        """Do not send any movement / stop command on close."""
+        event.accept()
+
+
+# ============================================================================
 #  Main GUI
 # ============================================================================
 
 class EarendilControlGui(QMainWindow):
     """
     Main rover control window.
-    Left side: control panels.  Right side: serial console.
+    Left side: control panels.  Right side: GUI console.
+    Connects to the Raspberry Pi TCP-to-Serial bridge.
     """
 
     # -- Theme palettes -------------------------------------------------------
@@ -1159,38 +2297,40 @@ class EarendilControlGui(QMainWindow):
             color: {c['text']};
             font-size: 13px;
             font-weight: {c['font_weight']};
-        }}
-        /* Container widgets stay transparent so the centered background logo
-           (painted on the central widget) shows through the panel gaps. */
-        QSplitter {{
             background: transparent;
         }}
         QWidget#sidePanel {{
+            background: transparent;
+        }}
+        QScrollArea, QScrollArea > QWidget, QScrollArea > QWidget > QWidget {{
+            background: transparent;
+        }}
+        QSplitter {{
             background: transparent;
         }}
         QGroupBox {{
             background-color: {c['bg_panel']};
             border: 1px solid {c['border']};
             border-radius: 6px;
-            margin-top: 10px;
+            margin-top: 6px;
             margin-bottom: 0px;
-            padding-top: 14px;
+            padding-top: 10px;
             padding-bottom: 0px;
             font-weight: bold;
             color: {c['text']};
         }}
         QGroupBox::title {{
             subcontrol-origin: margin;
-            left: 12px;
-            padding: 0 6px;
+            left: 10px;
+            padding: 0 4px;
             color: {c['accent_gold']};
         }}
         QPushButton {{
             background-color: {c['bg_input']};
             border: 1px solid {c['border']};
             border-radius: 6px;
-            padding: 6px 14px;
-            min-height: 28px;
+            padding: 4px 10px;
+            min-height: 22px;
             color: {c['text']};
             font-weight: {c['font_weight']};
         }}
@@ -1266,6 +2406,28 @@ class EarendilControlGui(QMainWindow):
     PWM_MAX = 4000
     VALUE_STEP = 5
     DUTY_STEP = 100
+
+    # TCP teardown reasons.  The socket state remains the transport source of
+    # truth; these values record why an active attempt/session is ending so
+    # asynchronous Qt signals cannot change the operator-facing outcome.
+    TCP_USER_DISCONNECT = "USER_DISCONNECT"
+    TCP_USER_CANCEL = "USER_CANCEL"
+    TCP_CONNECT_TIMEOUT = "CONNECT_TIMEOUT"
+    TCP_SOCKET_ERROR = "SOCKET_ERROR"
+    TCP_REMOTE_CLOSE = "REMOTE_CLOSE"
+    TCP_RX_OVERFLOW = "RX_OVERFLOW"
+    TCP_TX_OVERFLOW = "TX_OVERFLOW"
+    TCP_WINDOW_CLOSE = "WINDOW_CLOSE"
+    TCP_STALE_CONNECT = "STALE_CONNECT"
+
+    # Authoritative GUI-side state for the H7's shared MPU/MAG periodic
+    # stream.  The H7 emits an IMU_STREAM confirmation for explicit changes;
+    # individual one-shot sensor replies do not change this state.
+    IMU_STREAM_UNKNOWN = "UNKNOWN"
+    IMU_STREAM_STARTING = "STARTING"
+    IMU_STREAM_ON = "ON"
+    IMU_STREAM_STOPPING = "STOPPING"
+    IMU_STREAM_OFF = "OFF"
 
     # -- F411 Motor Fault Code Reference -----------------------------------
     FAULT_CODES = [
@@ -1416,6 +2578,21 @@ class EarendilControlGui(QMainWindow):
     ARM_POLL_SENSORS_MS = 500
     ARM_POLL_FAULT_MS = 1000
 
+    # -- Drill Telemetry (F401 M4/M5/M6 in DRILL mode) --------------------
+    DRILL_PARTS = ("elevator_l", "elevator_r", "drill")
+    DRILL_PART_LABELS = {
+        "elevator_l": "Elevator L",
+        "elevator_r": "Elevator R",
+        "drill":       "Drill Motor",
+    }
+    # In DRILL mode M4=elevator-left, M5=elevator-right, M6=drill motor.
+    DRILL_MOTOR_MAP = {"elevator_l": "M4", "elevator_r": "M5", "drill": "M6"}
+    DRILL_COL_HEADERS = ["Part", "Dir", "PWM", "Brake", "EN", "State", "Fault"]
+    DRILL_COL = {name: i for i, name in enumerate(DRILL_COL_HEADERS)}
+    DRILL_POLL_MOTORS_MS = 400
+    DRILL_POLL_FAULT_MS = 1000
+    DRILL_POLL_MODE_MS = 1000
+
     def __init__(self):
         super().__init__()
         self.setWindowTitle("Earendil - Rover Control")
@@ -1424,9 +2601,36 @@ class EarendilControlGui(QMainWindow):
         # -- State ----------------------------------------------------------
         self.current_theme = "light"            # "dark" or "light"
 
-        self.ser: serial.Serial | None = None
-        self.reader_thread: SerialReaderThread | None = None
-        self.connected = False
+        # -- TCP connection state -------------------------------------------
+        self._tcp_socket: QTcpSocket | None = None
+        self._tcp_rx_buffer = bytearray()
+        self._tcp_connect_timer = QTimer(self)
+        self._tcp_connect_timer.setSingleShot(True)
+        self._tcp_connect_timer.setInterval(DEFAULT_CONNECT_TIMEOUT_MS)
+        self._tcp_connect_timer.timeout.connect(self._on_tcp_connect_timeout)
+        self.connected = False  # True when TCP is connected (synced from socket state)
+        self._tcp_session_id: int = 0  # monotonically increasing; incremented on each new connection attempt
+        self._tcp_attempt_session_id: int | None = None
+        self._tcp_connected_session_id: int | None = None
+        self._tcp_teardown_session_id: int | None = None
+        self._tcp_finalized_session_id: int | None = None
+        self._tcp_prepared_session_id: int | None = None
+        self._tcp_teardown_reason: str | None = None
+        self._tcp_teardown_detail: str | None = None
+        self._window_closing: bool = False
+        self._heartbeat_timer = QTimer(self)
+        self._heartbeat_timer.setInterval(CONTROL_HEARTBEAT_PERIOD_MS)
+        self._heartbeat_timer.timeout.connect(self._send_heartbeat)
+        self._linkstat_retry_timers: list[QTimer] = []
+        for delay_ms in LINKSTAT_RETRY_DELAYS_MS:
+            timer = QTimer(self)
+            timer.setSingleShot(True)
+            timer.setInterval(delay_ms)
+            timer.setProperty("tcp_linkstat_connected", False)
+            self._linkstat_retry_timers.append(timer)
+
+        # -- H7 control-link status -----------------------------------------
+        self._h7_link_status = "UNKNOWN"   # "UNKNOWN" / "ALIVE" / "TIMEOUT"
 
         self.mode = "RPM"               # "RPM" or "DUTY"
         self.fb_rpm = self.DEFAULT_RPM_FB
@@ -1488,6 +2692,12 @@ class EarendilControlGui(QMainWindow):
         # -- IMU/MAG settings dialog reference ---------------------------
         self._imu_settings_dialog: ImuMagSettingsDialog | None = None
 
+        # -- Manipulation Arm Settings dialog reference ------------------
+        self._arm_settings_dialog: ManipulationArmSettingsDialog | None = None
+        # Latest parsed F401 params (per joint) - kept here so it survives
+        # dialog close/reopen and is applied when the dialog reappears.
+        self._arm_params_cache: dict[str, dict] = {}
+
         # -- Manipulation Arm Telemetry state ---------------------------
         self._arm_state: dict[str, dict[str, str]] = {
             j: {
@@ -1500,28 +2710,91 @@ class EarendilControlGui(QMainWindow):
         self._arm_sensors_seen: dict[str, bool] = {j: False for j in self.ARM_JOINTS}
         self._arm_heartbeat_active: bool = False
 
+        # -- Drill Telemetry state (F401 M4/M5/M6 in DRILL mode) --------
+        # Compact state model for the Drill Telemetry panel.  Mirrors the
+        # Manipulation Arm Telemetry style: defaults are shown until
+        # telemetry arrives.  ``mode`` is updated by the F401 ``get mode``
+        # parser and the mode-switch buttons via RX confirmation lines.
+        self._drill_state: dict = {
+            "mode": "UNKNOWN",
+            "parts": {
+                "elevator_l": {"dir": "STOP", "pwm": "0", "brake": "OFF",
+                                "en": "OFF", "state": "IDLE", "fault": "OK"},
+                "elevator_r": {"dir": "STOP", "pwm": "0", "brake": "OFF",
+                                "en": "OFF", "state": "IDLE", "fault": "OK"},
+                "drill":      {"dir": "STOP", "pwm": "0", "brake": "OFF",
+                                "en": "OFF", "state": "IDLE", "fault": "OK"},
+            },
+            "activity": "UNKNOWN",
+            "last_commanded_activity": "UNKNOWN",
+            "heartbeat_fault": False,
+        }
+
+        # -- Telemetry freshness tracking --------------------------------
+        # Timestamps (time.monotonic) of last valid telemetry per subsystem.
+        # 0.0 means "never received since connect".
+        self._freshness_motor: dict[str, float] = {m: 0.0 for m in ("FL", "FR", "RL", "RR")}
+        self._freshness_imu: float = 0.0
+        self._freshness_mag: float = 0.0
+        self._freshness_arm: float = 0.0
+        self._freshness_drill: float = 0.0
+        # Previous stale states for transition logging.
+        self._freshness_motor_stale: dict[str, bool] = {m: False for m in ("FL", "FR", "RL", "RR")}
+        self._freshness_imu_stale: bool = False
+        self._freshness_mag_stale: bool = False
+        self._freshness_arm_stale: bool = False
+        self._freshness_drill_stale: bool = False
+        self._imu_stream_state: str = self.IMU_STREAM_UNKNOWN
+        self._imu_one_shot_session_id: int | None = None
+        self._imu_one_shot_deadline: float = 0.0
+        self._mag_one_shot_session_id: int | None = None
+        self._mag_one_shot_deadline: float = 0.0
+        self._imu_stream_detect_session_id: int | None = None
+        self._imu_stream_detect_first_rx: float = 0.0
+        self._imu_stream_detect_count: int = 0
+        self._imu_stream_detect_suppress_session_id: int | None = None
+        self._imu_stream_detect_suppress_until: float = 0.0
+        # Telemetry expectation: True = telemetry actively expected,
+        # False = intentionally idle (not expected), None = not yet determined.
+        self._telemetry_expected: dict[str, bool | None] = {
+            "FL": None, "FR": None, "RL": None, "RR": None,
+            "IMU": None, "MAG": None, "ARM": False, "DRILL": False,
+        }
+        # Monotonic timestamp when expectation became True for a subsystem.
+        # Used to measure age from expectation start when no telemetry has
+        # been received yet (last_rx == 0.0).
+        self._telemetry_expected_since: dict[str, float] = {
+            "FL": 0.0, "FR": 0.0, "RL": 0.0, "RR": 0.0,
+            "IMU": 0.0, "MAG": 0.0, "ARM": 0.0, "DRILL": 0.0,
+        }
+        # Real motor link state (LOST/OK) preserved separately from freshness.
+        self._motor_link_state: dict[str, str] = {m: "UNKNOWN" for m in ("FL", "FR", "RL", "RR")}
+        self._freshness_timer = QTimer(self)
+        self._freshness_timer.setInterval(TELEMETRY_FRESHNESS_CHECK_MS)
+        self._freshness_timer.timeout.connect(self._check_telemetry_freshness)
+
         # -- Build UI -------------------------------------------------------
         self._central = LogoBackgroundWidget("earendil_logo.png", opacity=1.0)
         central = self._central
         self.setCentralWidget(central)
         main_layout = QHBoxLayout(central)
-        main_layout.setContentsMargins(8, 8, 8, 8)
-        main_layout.setSpacing(8)
+        main_layout.setContentsMargins(4, 4, 4, 4)
+        main_layout.setSpacing(4)
 
         splitter = QSplitter(Qt.Horizontal)
         main_layout.addWidget(splitter)
 
-        # Left panel
+        # Left panel (wrapped in QScrollArea for overflow)
         left_panel = QWidget()
         left_panel.setObjectName("sidePanel")
         left_layout = QVBoxLayout(left_panel)
         left_layout.setContentsMargins(0, 0, 0, 0)
-        left_layout.setSpacing(8)
+        left_layout.setSpacing(4)
 
-        # -- Top row: Serial Connection (left) + Rover Status (right) ---
+        # -- Top row: Network Connection (left) + Rover Status (right) ---
         top_row = QHBoxLayout()
         top_row.setContentsMargins(0, 0, 0, 0)
-        top_row.setSpacing(8)
+        top_row.setSpacing(4)
         top_row.addWidget(self._build_connection_group())
         top_row.addWidget(self._build_rover_status_group(), 1)
 
@@ -1530,7 +2803,7 @@ class EarendilControlGui(QMainWindow):
         # -- Mode / Value  (left)  +  Operating Mode (right)  in one row --
         mode_op_row = QHBoxLayout()
         mode_op_row.setContentsMargins(0, 0, 0, 0)
-        mode_op_row.setSpacing(8)
+        mode_op_row.setSpacing(4)
         mode_op_row.addWidget(self._build_mode_value_group(), 1)
         mode_op_row.addWidget(self._build_operating_mode_group())
         left_layout.addLayout(mode_op_row)
@@ -1539,7 +2812,20 @@ class EarendilControlGui(QMainWindow):
 
         left_layout.addWidget(self._build_motor_table_group())
 
-        left_layout.addWidget(self._build_arm_telemetry_group())
+        # Manipulation Arm Telemetry + Drill Telemetry side-by-side in a
+        # QSplitter so the user can drag the divider.  Arm gets 3/5 of
+        # the available width, drill gets 2/5; minimum widths ensure both
+        # tables stay readable.
+        arm_drill_splitter = QSplitter(Qt.Horizontal)
+        arm_grp = self._build_arm_telemetry_group()
+        drill_grp = self._build_drill_telemetry_group()
+        arm_drill_splitter.addWidget(arm_grp)
+        arm_drill_splitter.addWidget(drill_grp)
+        arm_drill_splitter.setStretchFactor(0, 3)
+        arm_drill_splitter.setStretchFactor(1, 2)
+        arm_grp.setMinimumWidth(620)
+        drill_grp.setMinimumWidth(450)
+        left_layout.addWidget(arm_drill_splitter)
 
         imu_env_row = QHBoxLayout()
         imu_env_row.setContentsMargins(0, 0, 0, 0)
@@ -1548,9 +2834,16 @@ class EarendilControlGui(QMainWindow):
         imu_env_row.addStretch()
         left_layout.addLayout(imu_env_row)
 
-        left_layout.addStretch()
-
-        splitter.addWidget(left_panel)
+        # Wrap left_panel in a QScrollArea so content is accessible
+        # when the window is shorter than the combined widget heights.
+        left_scroll = QScrollArea()
+        left_scroll.setWidgetResizable(True)
+        left_scroll.setWidget(left_panel)
+        left_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        left_scroll.setFrameShape(QFrame.NoFrame)
+        left_scroll.viewport().setAutoFillBackground(False)
+        left_scroll.setStyleSheet("QScrollArea { background: transparent; }")
+        splitter.addWidget(left_scroll)
 
         # Right panel - console
         splitter.addWidget(self._build_console_group())
@@ -1589,12 +2882,26 @@ class EarendilControlGui(QMainWindow):
         self._arm_poll_fault_timer.setInterval(self.ARM_POLL_FAULT_MS)
         self._arm_poll_fault_timer.timeout.connect(self._arm_poll_fault)
 
+        # -- Drill telemetry polling timers --------------------------------
+        # Lightweight polling only fires while the TCP connection is active
+        # (see _drill_poll_*).  A single ``get motors`` request feeds both
+        # the Manipulation Arm Telemetry and the Drill Telemetry tables.
+        self._drill_poll_motors_timer = QTimer(self)
+        self._drill_poll_motors_timer.setInterval(self.DRILL_POLL_MOTORS_MS)
+        self._drill_poll_motors_timer.timeout.connect(self._drill_poll_motors)
+
+        self._drill_poll_fault_timer = QTimer(self)
+        self._drill_poll_fault_timer.setInterval(self.DRILL_POLL_FAULT_MS)
+        self._drill_poll_fault_timer.timeout.connect(self._drill_poll_fault)
+
+        self._drill_poll_mode_timer = QTimer(self)
+        self._drill_poll_mode_timer.setInterval(self.DRILL_POLL_MODE_MS)
+        self._drill_poll_mode_timer.timeout.connect(self._drill_poll_mode)
+
         # Prevent buttons from stealing keyboard focus (Space must always reach keyPressEvent)
         for btn in self.findChildren(QPushButton):
             btn.setFocusPolicy(Qt.NoFocus)
 
-        # H7 input handles its own keyboard events; main window handles the rest
-        self._h7_input.installEventFilter(self)
         self.setFocusPolicy(Qt.StrongFocus)
 
         # Apply the active theme to all widgets (stylesheet + inline styles +
@@ -1608,49 +2915,45 @@ class EarendilControlGui(QMainWindow):
     # ======================================================================
 
     def _build_connection_group(self) -> QGroupBox:
-        grp = QGroupBox("Serial Connection")
+        grp = QGroupBox("Network Connection")
         grp.setMaximumWidth(800)
         grp.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
         lay = QHBoxLayout(grp)
-        lay.setContentsMargins(6, 4, 6, 4)
-        lay.setSpacing(4)
+        lay.setContentsMargins(4, 2, 4, 2)
+        lay.setSpacing(3)
 
-        lay.addWidget(QLabel("Port:"))
-        self._port_combo = QComboBox()
-        self._port_combo.setFixedWidth(175)
-        lay.addWidget(self._port_combo)
+        lay.addWidget(QLabel("Raspberry Pi IP:"))
+        self._host_edit = QLineEdit(DEFAULT_BRIDGE_HOST)
+        self._host_edit.setFixedWidth(140)
+        lay.addWidget(self._host_edit)
 
-        self._btn_refresh = QPushButton("Refresh")
-        self._btn_refresh.setFixedWidth(80)
-        self._btn_refresh.clicked.connect(self._refresh_ports)
-        lay.addWidget(self._btn_refresh)
-
-        lay.addWidget(QLabel("Baud:"))
-        self._baud_edit = QLineEdit("115200")
-        self._baud_edit.setFixedWidth(90)
-        lay.addWidget(self._baud_edit)
+        lay.addWidget(QLabel("TCP Port:"))
+        self._port_spin = QSpinBox()
+        self._port_spin.setRange(1, 65535)
+        self._port_spin.setValue(DEFAULT_BRIDGE_PORT)
+        self._port_spin.setFixedWidth(80)
+        lay.addWidget(self._port_spin)
 
         self._btn_connect = QPushButton("Connect")
         self._btn_connect.setFixedWidth(105)
-        # Initial dark-theme default; _apply_theme() re-styles for the active theme.
         self._btn_connect.setStyleSheet("QPushButton { background-color: #1e6e3e; color: #C0C0C0; }")
         self._btn_connect.clicked.connect(self._toggle_connection)
         lay.addWidget(self._btn_connect)
 
-        self._lbl_status = QLabel("* Disconnected")
+        self._lbl_status = QLabel("Status: DISCONNECTED")
         self._lbl_status.setStyleSheet("color: #B00020; font-weight: bold;")
-        self._lbl_status.setFixedWidth(120)
+        self._lbl_status.setFixedWidth(170)
         lay.addWidget(self._lbl_status)
 
-        self._refresh_ports()
+        self._init_tcp_socket()
         return grp
 
     def _build_rover_status_group(self) -> QGroupBox:
         grp = QGroupBox("Rover Status")
         grp.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         lay = QHBoxLayout(grp)
-        lay.setContentsMargins(8, 4, 8, 4)
-        lay.setSpacing(16)
+        lay.setContentsMargins(6, 2, 6, 2)
+        lay.setSpacing(10)
 
         c = self._colors()
 
@@ -1665,13 +2968,16 @@ class EarendilControlGui(QMainWindow):
         self._lbl_qs_motion = _badge("Motion: IDLE", c['text_muted'])
         lay.addWidget(self._lbl_qs_motion)
 
-        self._lbl_qs_port = _badge("Port: Disconnected", c['danger'])
+        self._lbl_qs_port = _badge("Link: Disconnected", c['danger'])
         lay.addWidget(self._lbl_qs_port)
+
+        self._lbl_qs_h7_link = _badge("H7 Control Link: UNKNOWN", c['text_muted'])
+        lay.addWidget(self._lbl_qs_h7_link)
 
         lay.addStretch()
 
         # Theme toggle button - only changes visual theme, never sends a
-        # serial command.  Text reflects the theme we will switch TO.
+        # network command.  Text reflects the theme we will switch TO.
         self._btn_theme = QPushButton("Dark Mode")
         self._btn_theme.setFixedWidth(100)
         self._btn_theme.clicked.connect(self._toggle_theme)
@@ -1682,46 +2988,45 @@ class EarendilControlGui(QMainWindow):
         grp = QGroupBox("Mode / Value")
         grp.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         lay = QHBoxLayout(grp)
+        lay.setContentsMargins(6, 2, 6, 2)
+        lay.setSpacing(6)
 
         lay.addWidget(QLabel("Mode:"))
         self._lbl_mode = QLabel("RPM")
         self._lbl_mode.setStyleSheet(
-            "color: #D4AF37; font-size: 16px; font-weight: bold;"
+            "color: #D4AF37; font-size: 13px; font-weight: bold;"
         )
         lay.addWidget(self._lbl_mode)
 
-        lay.addSpacing(20)
+        lay.addSpacing(10)
         self._lbl_fb_label = QLabel("FB RPM:")
         lay.addWidget(self._lbl_fb_label)
         self._lbl_fb_value = QLabel(str(self.fb_rpm))
         self._lbl_fb_value.setStyleSheet(
-            "color: #FFD66B; font-size: 18px; font-weight: bold;"
+            "color: #FFD66B; font-size: 14px; font-weight: bold;"
         )
         lay.addWidget(self._lbl_fb_value)
 
-        lay.addSpacing(10)
+        lay.addSpacing(6)
         self._lbl_rot_label = QLabel("ROT RPM:")
         lay.addWidget(self._lbl_rot_label)
         self._lbl_rot_value = QLabel(str(self.rot_rpm))
         self._lbl_rot_value.setStyleSheet(
-            "color: #FFD66B; font-size: 18px; font-weight: bold;"
+            "color: #FFD66B; font-size: 14px; font-weight: bold;"
         )
         lay.addWidget(self._lbl_rot_value)
 
-        lay.addSpacing(10)
+        lay.addSpacing(6)
         lay.addWidget(QLabel("Turn Ratio:"))
         self._spin_turn_ratio = QDoubleSpinBox()
         self._spin_turn_ratio.setRange(0.0, 1.0)
         self._spin_turn_ratio.setSingleStep(0.05)
         self._spin_turn_ratio.setDecimals(2)
         self._spin_turn_ratio.setValue(self.turn_ratio)
-        self._spin_turn_ratio.setFixedWidth(70)
+        self._spin_turn_ratio.setFixedWidth(60)
         self._style_turn_ratio_spinbox()
         self._spin_turn_ratio.valueChanged.connect(self._on_turn_ratio_spin_changed)
         lay.addWidget(self._spin_turn_ratio)
-
-        lay.addSpacing(10)
-        lay.addWidget(QLabel("Shift/Ctrl:FB +/- | Num+/Num-:ROT +/- | Q/E:Turn Ratio -/+ | T/Y:Arc L/R"))
 
         lay.addStretch()
 
@@ -1749,13 +3054,13 @@ class EarendilControlGui(QMainWindow):
         grp.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
         grp.setMaximumWidth(420)
         lay = QHBoxLayout(grp)
-        lay.setContentsMargins(8, 6, 8, 6)
-        lay.setSpacing(8)
+        lay.setContentsMargins(6, 2, 6, 2)
+        lay.setSpacing(6)
 
         # -- Left: three LEDs (red / yellow / green) ----------------------
         leds_col = QVBoxLayout()
         leds_col.setContentsMargins(0, 0, 0, 0)
-        leds_col.setSpacing(5)
+        leds_col.setSpacing(3)
         self._led_red = self._make_led()
         self._led_yellow = self._make_led()
         self._led_green = self._make_led()
@@ -1768,11 +3073,11 @@ class EarendilControlGui(QMainWindow):
         # -- Right: status box on top, three buttons below ----------------
         right_col = QVBoxLayout()
         right_col.setContentsMargins(0, 0, 0, 0)
-        right_col.setSpacing(5)
+        right_col.setSpacing(3)
 
         self._lbl_op_mode_status = QLabel("DISARM")
         self._lbl_op_mode_status.setAlignment(Qt.AlignCenter)
-        self._lbl_op_mode_status.setFixedHeight(34)
+        self._lbl_op_mode_status.setFixedHeight(28)
         self._lbl_op_mode_status.setFixedWidth(380)
         # Initial styling follows the confirmed operating mode; _apply_theme()
         # and _update_operating_mode_ui() keep it theme-aware afterwards.
@@ -1811,8 +3116,8 @@ class EarendilControlGui(QMainWindow):
             }
         """)
         lay = QHBoxLayout(grp)
-        lay.setContentsMargins(6, 4, 6, 4)
-        lay.setSpacing(4)
+        lay.setContentsMargins(4, 2, 4, 2)
+        lay.setSpacing(2)
 
         self._mobility_modes = [
             "Mode 1", "Mode 2", "Mode 3", "Mode 4", "Mode 5",
@@ -1838,9 +3143,11 @@ class EarendilControlGui(QMainWindow):
             btn.setShortcut(QKeySequence(shortcut_keys[i]))
             btn.setStyleSheet("""
                 QPushButton {
-                    padding: 4px 8px;
-                    font-size: 11px;
-                    min-width: 60px;
+                    padding: 2px 4px;
+                    font-size: 10px;
+                    min-width: 50px;
+                    min-height: 20px;
+                    max-height: 24px;
                 }
                 QPushButton:checked {
                     background-color: palette(highlight);
@@ -1902,12 +3209,13 @@ class EarendilControlGui(QMainWindow):
 
         self._motor_table.setVerticalHeaderLabels([])
         self._motor_table.verticalHeader().setVisible(False)
+        self._motor_table.verticalHeader().setDefaultSectionSize(22)
         self._motor_table.setEditTriggers(QTableWidget.NoEditTriggers)
         self._motor_table.setFocusPolicy(Qt.NoFocus)
         self._motor_table.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         self._motor_table.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
-        self._motor_table.setMaximumHeight(150)
-        self._motor_table.setMinimumHeight(150)
+        self._motor_table.setMaximumHeight(120)
+        self._motor_table.setMinimumHeight(120)
         lay.addWidget(self._motor_table)
 
         # -- Settings / Faults buttons --------------------------------------
@@ -1939,6 +3247,7 @@ class EarendilControlGui(QMainWindow):
 
     def _build_imu_group(self) -> QGroupBox:
         grp = QGroupBox("IMU")
+        self._imu_grp = grp
         grp.setSizePolicy(QSizePolicy.Maximum, QSizePolicy.Fixed)
         grp.setStyleSheet("""
             QGroupBox {
@@ -1971,7 +3280,7 @@ class EarendilControlGui(QMainWindow):
         self._imu_table.verticalHeader().setMaximumWidth(0)
         self._imu_table.setMinimumWidth(0)
         self._imu_table.setMaximumWidth(260)
-        self._imu_table.setMaximumHeight(150)
+        self._imu_table.setMaximumHeight(120)
         self._imu_table.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
 
         labels = ["Accel", "Gyro", "Mag", "Temp"]
@@ -2029,6 +3338,7 @@ class EarendilControlGui(QMainWindow):
 
     def _build_arm_telemetry_group(self) -> QGroupBox:
         grp = QGroupBox("Manipulation Arm Telemetry")
+        self._arm_grp = grp
         grp.setStyleSheet("""
             QGroupBox {
                 padding-bottom: 0px;
@@ -2045,11 +3355,9 @@ class EarendilControlGui(QMainWindow):
         self._arm_table.setHorizontalHeaderLabels(self.ARM_COL_HEADERS)
         headers = self._arm_table.horizontalHeader()
         if headers:
-            headers.setSectionResizeMode(0, QHeaderView.Fixed)
-            headers.resizeSection(0, 90)
-            for col in range(1, num_cols):
-                headers.setSectionResizeMode(col, QHeaderView.Fixed)
-                headers.resizeSection(col, 90)
+            headers.setSectionResizeMode(self.ARM_COL["Axis"], QHeaderView.Stretch)
+            for col_idx in range(1, num_cols):
+                headers.setSectionResizeMode(col_idx, QHeaderView.ResizeToContents)
 
         col = self.ARM_COL
         for row, joint in enumerate(self.ARM_JOINTS):
@@ -2067,23 +3375,30 @@ class EarendilControlGui(QMainWindow):
 
         self._arm_table.setVerticalHeaderLabels([])
         self._arm_table.verticalHeader().setVisible(False)
+        self._arm_table.verticalHeader().setDefaultSectionSize(28)
         self._arm_table.setEditTriggers(QTableWidget.NoEditTriggers)
         self._arm_table.setFocusPolicy(Qt.NoFocus)
         self._arm_table.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         self._arm_table.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
-        table_height = (num_rows + 1) * 30
-        table_width = num_cols * 90
-        self._arm_table.setMaximumHeight(table_height)
+        table_height = (num_rows + 1) * 28
         self._arm_table.setMinimumHeight(table_height)
-        self._arm_table.setMaximumWidth(table_width)
-        self._arm_table.setMinimumWidth(table_width)
+        self._arm_table.setMinimumWidth(620)
         lay.addWidget(self._arm_table)
 
-        # Refresh params button
+        # Settings + Refresh params + Polling toggle buttons
         btn_row = QHBoxLayout()
         btn_row.setContentsMargins(0, 0, 0, 0)
         btn_row.setSpacing(4)
+        self._btn_arm_poll = QPushButton("Start Arm Polling")
+        self._btn_arm_poll.setStyleSheet("QPushButton { padding: 0px; margin: 0px; }")
+        self._btn_arm_poll.setCheckable(True)
+        self._btn_arm_poll.toggled.connect(self._arm_polling_toggled)
+        btn_row.addWidget(self._btn_arm_poll)
         btn_row.addStretch()
+        btn_arm_settings = QPushButton("Settings")
+        btn_arm_settings.setStyleSheet("QPushButton { padding: 0px; margin: 0px; }")
+        btn_arm_settings.clicked.connect(self._open_arm_settings)
+        btn_row.addWidget(btn_arm_settings)
         btn_arm_refresh = QPushButton("Refresh Params")
         btn_arm_refresh.setStyleSheet("QPushButton { padding: 0px; margin: 0px; }")
         btn_arm_refresh.clicked.connect(self._arm_refresh_params)
@@ -2102,31 +3417,579 @@ class EarendilControlGui(QMainWindow):
                 item.setForeground(QColor(color))
 
     def _arm_refresh_params(self):
-        if self.connected:
-            self._send_cmd("params")
+        if self._tcp_is_connected():
+            self._send_manipulation_cmd("params")
             self._log_info("[ARM] Requesting params refresh")
 
     def _arm_poll_motors(self):
-        if self.connected:
-            self._send_cmd("get motors")
+        if self._tcp_is_connected():
+            self._send_manipulation_cmd("get motors")
 
     def _arm_poll_sensors(self):
-        if self.connected:
-            self._send_cmd("get sensors")
+        if self._tcp_is_connected():
+            self._send_manipulation_cmd("get sensors")
 
     def _arm_poll_fault(self):
-        if self.connected:
-            self._send_cmd("get fault")
+        if self._tcp_is_connected():
+            self._send_manipulation_cmd("get fault")
 
     def _arm_start_polling(self):
+        self._telemetry_expected["ARM"] = True
+        self._telemetry_expected_since["ARM"] = time.monotonic()
         self._arm_poll_motors_timer.start()
         self._arm_poll_sensors_timer.start()
         self._arm_poll_fault_timer.start()
 
     def _arm_stop_polling(self):
+        self._telemetry_expected["ARM"] = False
+        self._telemetry_expected_since["ARM"] = 0.0
         self._arm_poll_motors_timer.stop()
         self._arm_poll_sensors_timer.stop()
         self._arm_poll_fault_timer.stop()
+        if hasattr(self, "_btn_arm_poll"):
+            self._btn_arm_poll.setChecked(False)
+
+    def _arm_polling_toggled(self, checked: bool):
+        if checked:
+            if not self._tcp_is_connected():
+                self._btn_arm_poll.setChecked(False)
+                self._log_warn("[ARM] Cannot start polling — not connected")
+                return
+            self._arm_start_polling()
+            self._btn_arm_poll.setText("Stop Arm Polling")
+            self._log_info("[ARM] Telemetry polling started")
+        else:
+            self._arm_stop_polling()
+            self._btn_arm_poll.setText("Start Arm Polling")
+            self._log_info("[ARM] Telemetry polling stopped")
+
+    # ======================================================================
+    #  Drill Telemetry (F401 M4/M5/M6 in DRILL mode)
+    #  Compact panel beside the Manipulation Arm Telemetry panel:
+    #    - Mode switch buttons (Manipulation / Drill / Safe / Stop All)
+    #    - F401 mode chip
+    #    - Drill telemetry table (Elevator L / Elevator R / Drill Motor)
+    #    - Drill Activity info box
+    #  All commands go through the centralized manipulation sender, which
+    #  adds the H7 ``arm`` route before using _send_cmd().  The panel is
+    #  telemetry + mode switching only - no drill settings controls here.
+    # ======================================================================
+
+    def _build_drill_telemetry_group(self) -> QGroupBox:
+        """Build the compact Drill Telemetry panel.
+
+        Mirrors the styling of the Manipulation Arm Telemetry group so both
+        panels read consistently side-by-side.  The inner table is fixed
+        width/height so the row does not grow uncontrollably.
+        """
+        grp = QGroupBox("Drill Telemetry")
+        self._drill_grp = grp
+        grp.setStyleSheet("""
+            QGroupBox {
+                padding-bottom: 0px;
+                margin-bottom: 0px;
+            }
+        """)
+        lay = QVBoxLayout(grp)
+        lay.setContentsMargins(6, 4, 6, 0)
+        lay.setSpacing(4)
+
+        # -- Mode switch buttons --------------------------------------------
+        mode_row = QHBoxLayout()
+        mode_row.setContentsMargins(0, 0, 0, 0)
+        mode_row.setSpacing(4)
+
+        def _mode_btn(label: str, cmd: str, *, danger=False) -> QPushButton:
+            b = QPushButton(label)
+            b.setStyleSheet("QPushButton { padding: 0px; margin: 0px; }")
+            b.clicked.connect(lambda: self._send_drill_cmd(cmd))
+            return b
+
+        b_manip = _mode_btn("ARM Mode", "mode arm confirm")
+        b_drill = _mode_btn("DRILL Mode", "mode drill confirm")
+        b_safe = _mode_btn("SAFE", "mode safe", danger=True)
+        b_stopall = _mode_btn("STOP ALL", "stopall", danger=True)
+        mode_row.addWidget(b_manip)
+        mode_row.addWidget(b_drill)
+        mode_row.addWidget(b_safe)
+        mode_row.addWidget(b_stopall)
+        mode_row.addStretch()
+        self._btn_drill_poll = QPushButton("Start Drill Polling")
+        self._btn_drill_poll.setStyleSheet("QPushButton { padding: 0px; margin: 0px; }")
+        self._btn_drill_poll.setCheckable(True)
+        self._btn_drill_poll.toggled.connect(self._drill_polling_toggled)
+        mode_row.addWidget(self._btn_drill_poll)
+        lay.addLayout(mode_row)
+
+        # -- F401 mode chip --------------------------------------------------
+        chip_row = QHBoxLayout()
+        chip_row.setContentsMargins(0, 0, 0, 0)
+        chip_row.setSpacing(4)
+        self._drill_mode_chip = QLabel("F401 Mode: UNKNOWN")
+        self._drill_mode_chip.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
+        self._drill_mode_chip.setStyleSheet(self._drill_chip_style("UNKNOWN"))
+        chip_row.addWidget(self._drill_mode_chip)
+        chip_row.addStretch()
+        lay.addLayout(chip_row)
+
+        # -- Drill telemetry table ------------------------------------------
+        num_rows = len(self.DRILL_PARTS)
+        num_cols = len(self.DRILL_COL_HEADERS)
+        self._drill_table = QTableWidget(num_rows, num_cols)
+        self._drill_table.setHorizontalHeaderLabels(self.DRILL_COL_HEADERS)
+        headers = self._drill_table.horizontalHeader()
+        if headers:
+            col = self.DRILL_COL
+            headers.setSectionResizeMode(col["Part"], QHeaderView.ResizeToContents)
+            headers.setSectionResizeMode(col["Dir"], QHeaderView.ResizeToContents)
+            headers.setSectionResizeMode(col["PWM"], QHeaderView.ResizeToContents)
+            headers.setSectionResizeMode(col["Brake"], QHeaderView.ResizeToContents)
+            headers.setSectionResizeMode(col["EN"], QHeaderView.ResizeToContents)
+            headers.setSectionResizeMode(col["State"], QHeaderView.Stretch)
+            headers.setSectionResizeMode(col["Fault"], QHeaderView.ResizeToContents)
+
+        col = self.DRILL_COL
+        for row, part in enumerate(self.DRILL_PARTS):
+            st = self._drill_state["parts"][part]
+            self._drill_table.setItem(row, col["Part"], QTableWidgetItem(self.DRILL_PART_LABELS[part]))
+            self._drill_table.setItem(row, col["Dir"], QTableWidgetItem(st["dir"]))
+            self._drill_table.setItem(row, col["PWM"], QTableWidgetItem(st["pwm"]))
+            self._drill_table.setItem(row, col["Brake"], QTableWidgetItem(st["brake"]))
+            self._drill_table.setItem(row, col["EN"], QTableWidgetItem(st["en"]))
+            self._drill_table.setItem(row, col["State"], QTableWidgetItem(st["state"]))
+            self._drill_table.setItem(row, col["Fault"], QTableWidgetItem(st["fault"]))
+
+        self._drill_table.setVerticalHeaderLabels([])
+        self._drill_table.verticalHeader().setVisible(False)
+        self._drill_table.verticalHeader().setDefaultSectionSize(28)
+        self._drill_table.setEditTriggers(QTableWidget.NoEditTriggers)
+        self._drill_table.setFocusPolicy(Qt.NoFocus)
+        self._drill_table.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self._drill_table.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        drill_table_height = (num_rows + 1) * 28
+        self._drill_table.setMinimumHeight(drill_table_height)
+        self._drill_table.setMinimumWidth(430)
+        lay.addWidget(self._drill_table)
+
+        # -- Manual refresh buttons (debug only) -----------------------------
+        refresh_row = QHBoxLayout()
+        refresh_row.setContentsMargins(0, 0, 0, 0)
+        refresh_row.setSpacing(4)
+        b_get_mode = QPushButton("Get Mode")
+        b_get_mode.setStyleSheet("QPushButton { padding: 0px; margin: 0px; }")
+        b_get_mode.clicked.connect(lambda: self._send_drill_cmd("get mode"))
+        b_get_motors = QPushButton("Get Motors")
+        b_get_motors.setStyleSheet("QPushButton { padding: 0px; margin: 0px; }")
+        b_get_motors.clicked.connect(lambda: self._send_drill_cmd("get motors"))
+        refresh_row.addWidget(b_get_mode)
+        refresh_row.addWidget(b_get_motors)
+        refresh_row.addStretch()
+        lay.addLayout(refresh_row)
+
+        # -- Drill Activity info box ---------------------------------------
+        self._drill_activity_box = QLabel("NO DATA")
+        self._drill_activity_box.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
+        self._drill_activity_box.setWordWrap(True)
+        self._drill_activity_box.setMinimumHeight(28)
+        self._drill_activity_box.setStyleSheet(self._drill_activity_style("NO DATA"))
+        lay.addWidget(self._drill_activity_box)
+
+        lay.addStretch()
+        return grp
+
+    def _drill_chip_style(self, mode: str) -> str:
+        """Style the F401 mode chip using the active theme palette."""
+        c = self._colors()
+        color_by_mode = {
+            "SAFE": c.get("warning", c["text_muted"]),
+            "ARM":  c.get("accent_gold", c["text"]),
+            "DRILL": c.get("success_bright", c["text"]),
+            "UNKNOWN": c["text_muted"],
+        }
+        fg = color_by_mode.get(mode, c["text_muted"])
+        return (f"color: {fg}; font-size: 11px; font-weight: bold;"
+                f" background: {c['bg_input']}; border: 1px solid {c['border']};"
+                f" border-radius: 8px; padding: 2px 8px;")
+
+    def _drill_activity_style(self, activity: str) -> str:
+        """Style the Drill Activity box using the active theme palette.
+
+        - neutral/idle: muted text
+        - active movement/digging: success / accent
+        - warning / mismatch: warning
+        - fault: danger
+        """
+        c = self._colors()
+        a = (activity or "").upper()
+        warning_words = ("MISMATCH", "WARNING")
+        fault_words = ("FAULT",)
+        if any(w in a for w in fault_words):
+            fg, bg, bd = c["danger_bright"], c["bg_input"], c["danger"]
+        elif any(w in a for w in warning_words):
+            fg, bg, bd = c["warning"], c["bg_input"], c["warning"]
+        elif ("IDLE" in a or "SAFE" == a or "MANIPULATION" in a
+              or "UNKNOWN" in a or "NO DATA" in a
+              or "WAITING" in a):
+            fg, bg, bd = c["text_muted"], c["bg_input"], c["border"]
+        else:
+            # Active: ELEVATOR UP/DOWN, DRILL DIGGING/EXTRACTING/ACTIVE, ...
+            fg = c.get("success_bright", c["accent_gold"])
+            bg = c["bg_input"]
+            bd = c.get("success", c["accent_gold"])
+        return (f"color: {fg}; font-size: 12px; font-weight: bold;"
+                f" background: {bg}; border: 1px solid {bd};"
+                f" border-radius: 6px; padding: 4px 8px;")
+
+    def _send_drill_cmd(self, cmd: str):
+        """Send a drill / mode command through the H7 manipulation route.
+
+        A-side effect: track the last GUI-commanded drill activity so the
+        Drill Activity box can fall back to it when the ``get motors``
+        direction naming is not enough to classify UP/DOWN/DIG/EXTRACT.
+        """
+        self._drill_track_command(cmd)
+        if not self._tcp_is_connected():
+            self._log_warn(f"[DRILL] Not sent (not connected): {cmd}")
+            return
+        self._send_manipulation_cmd(cmd)
+
+    def _drill_track_command(self, cmd: str):
+        """Map the last GUI-commanded drill command to an activity hint."""
+        parts = cmd.strip().split()
+        if not parts:
+            return
+        kw = parts[0].lower()
+        if kw == "elv":
+            if len(parts) >= 2:
+                sub = parts[1].lower()
+                if sub == "up":
+                    self._drill_state["last_commanded_activity"] = "ELEVATOR UP"
+                elif sub == "down":
+                    self._drill_state["last_commanded_activity"] = "ELEVATOR DOWN"
+                elif sub == "stop":
+                    self._drill_state["last_commanded_activity"] = "DRILL IDLE"
+        elif kw == "drill":
+            if len(parts) >= 2:
+                sub = parts[1].lower()
+                if sub == "dig":
+                    self._drill_state["last_commanded_activity"] = "DRILL DIGGING"
+                elif sub == "extract":
+                    self._drill_state["last_commanded_activity"] = "DRILL EXTRACTING"
+                elif sub == "stop":
+                    self._drill_state["last_commanded_activity"] = "DRILL IDLE"
+        elif kw in ("stop", "stopall"):
+            self._drill_state["last_commanded_activity"] = "DRILL IDLE"
+        elif kw == "mode":
+            if len(parts) >= 2:
+                sub = parts[1].lower()
+                if sub == "safe":
+                    self._drill_state["last_commanded_activity"] = "SAFE"
+                elif sub == "arm":
+                    self._drill_state["last_commanded_activity"] = "MANIPULATION MODE"
+                elif sub == "drill":
+                    # Mode change itself does not imply movement.
+                    self._drill_state["last_commanded_activity"] = "DRILL IDLE"
+        self._update_drill_activity_box()
+
+    def _drill_poll_motors(self):
+        if self._tcp_is_connected():
+            self._send_manipulation_cmd("get motors")
+
+    def _drill_poll_fault(self):
+        if self._tcp_is_connected():
+            self._send_manipulation_cmd("get fault")
+
+    def _drill_poll_mode(self):
+        if self._tcp_is_connected():
+            self._send_manipulation_cmd("get mode")
+
+    def _drill_start_polling(self):
+        self._telemetry_expected["DRILL"] = True
+        self._telemetry_expected_since["DRILL"] = time.monotonic()
+        self._drill_poll_motors_timer.start()
+        self._drill_poll_fault_timer.start()
+        self._drill_poll_mode_timer.start()
+
+    def _drill_stop_polling(self):
+        self._telemetry_expected["DRILL"] = False
+        self._telemetry_expected_since["DRILL"] = 0.0
+        self._drill_poll_motors_timer.stop()
+        self._drill_poll_fault_timer.stop()
+        self._drill_poll_mode_timer.stop()
+        if hasattr(self, "_btn_drill_poll"):
+            self._btn_drill_poll.setChecked(False)
+
+    def _drill_polling_toggled(self, checked: bool):
+        if checked:
+            if not self._tcp_is_connected():
+                self._btn_drill_poll.setChecked(False)
+                self._log_warn("[DRILL] Cannot start polling — not connected")
+                return
+            self._drill_start_polling()
+            self._btn_drill_poll.setText("Stop Drill Polling")
+            self._log_info("[DRILL] Telemetry polling started")
+        else:
+            self._drill_stop_polling()
+            self._btn_drill_poll.setText("Start Drill Polling")
+            self._log_info("[DRILL] Telemetry polling stopped")
+
+    def _set_drill_cell(self, part: str, col_name: str, text: str,
+                         color: str | None = None):
+        row = self.DRILL_PARTS.index(part)
+        col = self.DRILL_COL[col_name]
+        item = self._drill_table.item(row, col)
+        if item is not None:
+            item.setText(text)
+            if color:
+                item.setForeground(QColor(color))
+
+    def _update_drill_table(self):
+        """Refresh the drill telemetry table from ``self._drill_state``."""
+        c = self._colors()
+        col = self.DRILL_COL
+        for part in self.DRILL_PARTS:
+            st = self._drill_state["parts"][part]
+            self._set_drill_cell(part, "Dir", st["dir"])
+            self._set_drill_cell(part, "PWM", st["pwm"])
+            self._set_drill_cell(part, "Brake", st["brake"],
+                                 c["danger"] if st["brake"] == "ON" else None)
+            self._set_drill_cell(part, "EN", st["en"],
+                                 c["success_bright"] if st["en"] == "ON" else None)
+            self._set_drill_cell(part, "State", st["state"])
+            fault = st["fault"]
+            fault_color = None
+            if fault == "FAULT":
+                fault_color = c["danger"]
+            elif fault == "MISMATCH":
+                fault_color = c["warning"]
+            elif fault == "OK":
+                fault_color = c["success_bright"]
+            self._set_drill_cell(part, "Fault", fault, fault_color)
+
+    def _update_drill_mode_chip(self):
+        mode = self._drill_state["mode"]
+        self._drill_mode_chip.setText(f"F401 Mode: {mode}")
+        self._drill_mode_chip.setStyleSheet(self._drill_chip_style(mode))
+
+    def _update_drill_activity_box(self):
+        """Decide the current Drill Activity text and re-style the box."""
+        a = self._drill_compute_activity()
+        self._drill_state["activity"] = a
+        if self._drill_state["heartbeat_fault"]:
+            a = "FAULT"
+        self._drill_activity_box.setText(a)
+        self._drill_activity_box.setStyleSheet(self._drill_activity_style(a))
+
+    def _drill_compute_activity(self) -> str:
+        """Classify the current drill-system activity from state + commands.
+
+        See the task spec for the full decision table.  Returns one of:
+        NO DATA / SAFE / MANIPULATION MODE / DRILL IDLE / ELEVATOR UP
+        / ELEVATOR DOWN / ELEVATOR L ACTIVE / ELEVATOR R ACTIVE
+        / ELEVATOR L/R MISMATCH / DRILL DIGGING / DRILL EXTRACTING
+        / DRILL ACTIVE / FAULT / UNKNOWN.
+        """
+        st = self._drill_state
+        mode = st["mode"]
+        if mode == "SAFE":
+            return "SAFE"
+        if mode == "ARM":
+            return "MANIPULATION MODE"
+        if st["heartbeat_fault"]:
+            return "FAULT"
+        # DRILL or UNKNOWN -> look at parts.
+        parts = st["parts"]
+        el = parts["elevator_l"]
+        er = parts["elevator_r"]
+        dr = parts["drill"]
+
+        def _active(p: dict) -> bool:
+            return (p["dir"] != "STOP") or (int(_safe_int(p["pwm"])) > 0)
+
+        el_act = _active(el)
+        er_act = _active(er)
+        dr_act = _active(dr)
+
+        if not el_act and not er_act and not dr_act:
+            if mode == "DRILL":
+                return "DRILL IDLE"
+            # Mode not yet confirmed and no telemetry activity -> show a
+            # clear "no data yet" hint instead of the opaque "UNKNOWN".
+            if mode == "UNKNOWN":
+                return "NO DATA"
+            return "UNKNOWN"
+
+        # Drill motor first - it has its own dig/extract classification.
+        if dr_act:
+            d_dir = dr["dir"].upper()
+            if d_dir in ("DIG", "FWD"):
+                return "DRILL DIGGING"
+            if d_dir in ("EXTRACT", "BWD", "REV"):
+                return "DRILL EXTRACTING"
+            # Fall back to last GUI-commanded drill activity if available.
+            last = st["last_commanded_activity"].upper()
+            if "DIGGING" in last:
+                return "DRILL DIGGING"
+            if "EXTRACTING" in last:
+                return "DRILL EXTRACTING"
+            return "DRILL ACTIVE"
+
+        # Elevator pair logic.
+        if el_act and er_act:
+            # Both active - classify direction + mismatch check.
+            if (el["dir"] != er["dir"]
+                    or el["en"] != er["en"]
+                    or el["brake"] != er["brake"]):
+                return "ELEVATOR L/R MISMATCH"
+            d = el["dir"].upper()
+            # In elevator land prefer the last GUI-commanded hint.
+            last = st["last_commanded_activity"].upper()
+            if "UP" in last:
+                return "ELEVATOR UP"
+            if "DOWN" in last:
+                return "ELEVATOR DOWN"
+            if d in ("UP", "FWD"):
+                return "ELEVATOR UP"
+            if d in ("DOWN", "BWD", "REV"):
+                return "ELEVATOR DOWN"
+            return "DRILL ACTIVE"
+        if el_act:
+            return "ELEVATOR L ACTIVE"
+        if er_act:
+            return "ELEVATOR R ACTIVE"
+        return "DRILL ACTIVE"
+
+    # -- Drill parsers --------------------------------------------------------
+
+    def _parse_drill_get_motors_line(self, line: str) -> bool:
+        """Parse ``M4/M5/M6`` ``DIR= PWM= BRAKE= EN= ...`` lines.
+
+        Tolerant search: any line that contains a leading ``M4``/``M5``/``M6``
+        token followed by KEY=VALUE pairs is accepted.  Unknown fields are
+        ignored.  Returns ``True`` if a recognised motor line updated the
+        drill state, ``False`` otherwise.  This is invoked from
+        ``_arm_parse_motors`` for any M4/M5/M6 line it already matched, and
+        also directly from ``_on_rx_line`` as a fallback parser for variations
+        (e.g. extra keys) the manipulation regex might miss.
+        """
+        m = re.search(r"(^|\s)M([456])(?=\s|$|[^0-9])", line)
+        if not m:
+            return False
+        motor_num = int(m.group(2))
+        motor_tag = f"M{motor_num}"
+        part = next((p for p, mm in self.DRILL_MOTOR_MAP.items()
+                     if mm == motor_tag), None)
+        if part is None:
+            return False
+        # Extract all KEY=VALUE tokens in the line.
+        kv: dict[str, str] = {}
+        for tok in line.split():
+            if "=" not in tok:
+                continue
+            k, v = tok.split("=", 1)
+            kv[k.strip().upper()] = v.strip()
+        if not kv:
+            return False
+
+        c = self._colors()
+        st = self._drill_state["parts"][part]
+        if "DIR" in kv:
+            raw_dir = kv["DIR"].upper()
+            st["dir"] = raw_dir
+        if "PWM" in kv:
+            st["pwm"] = str(_safe_int(kv["PWM"], 0))
+        if "BRAKE" in kv:
+            st["brake"] = "ON" if kv["BRAKE"].upper() == "ON" else "OFF"
+        if "EN" in kv:
+            st["en"] = "ON" if kv["EN"].upper() == "ON" else "OFF"
+
+        # Derive a simple per-part state.
+        pwm_val = int(_safe_int(st["pwm"], 0))
+        if st["dir"] == "STOP" and pwm_val <= 0:
+            st["state"] = "IDLE"
+        elif st["brake"] == "ON":
+            st["state"] = "STOPPED"
+        elif pwm_val > 0:
+            st["state"] = "MOVING"
+        else:
+            st["state"] = "UNKNOWN"
+
+        self._touch_drill_freshness()
+        self._update_drill_table()
+        self._update_drill_activity_box()
+        return True
+
+    def _parse_drill_mode_line(self, line: str) -> bool:
+        """Parse F401 ``get mode`` / mode-change confirmation lines.
+
+        Recognised (case-insensitive; F401 vocabulary is SAFE/ARM/DRILL only):
+            MODE SAFE / MODE ARM / MODE DRILL          (spaced)
+            MODE=SAFE / MODE=ARM / MODE=DRILL          (key=value)
+            OK MODE SAFE / OK MODE ARM / OK MODE DRILL (prefixed ack)
+            OK MODE=SAFE / OK MODE=ARM / OK MODE=DRILL (prefixed ack, kv)
+            SAFE active / ARM active / DRILL active    (mode confirm)
+            [MODE] SAFE / [MODE] ARM / [MODE] DRILL    (tagged log lines)
+            ... SAFE mode / ... ARM mode / ... DRILL mode (phrase)
+        Lines that don't look like an F401 mode line return ``False`` so the
+        H7 operating-mode parser keeps ownership of DISARM/MANUAL/AUTONOMOUS:
+        the F401 vocabulary here intentionally excludes those tokens.
+        """
+        upper = line.upper()
+        mode = None
+        # Key=value: ``MODE=SAFE`` / ``OK MODE=SAFE`` (with optional spaces
+        # around ``=``) and the spaced variant ``MODE SAFE`` / ``OK MODE SAFE``.
+        m = re.search(r"\bMODE\s*[=\s]\s*(SAFE|ARM|DRILL)\b", upper)
+        if m:
+            mode = m.group(1)
+        else:
+            # ``<NAME> active`` confirmation (F401 only).
+            m = re.search(r"\b(SAFE|ARM|DRILL)\s+ACTIVE\b", upper)
+            if m:
+                mode = m.group(1)
+            else:
+                # Tagged log line: ``[MODE] SAFE`` / ``[MODE] ARM`` / ...
+                m = re.search(r"\[MODE\]\s+(SAFE|ARM|DRILL)\b", upper)
+                if m:
+                    mode = m.group(1)
+                else:
+                    # Phrase: ``... SAFE mode`` / ``... ARM mode`` / ...
+                    m = re.search(r"\b(SAFE|ARM|DRILL)\s+MODE\b", upper)
+                    if m:
+                        mode = m.group(1)
+        if mode is None:
+            return False
+        self._drill_state["mode"] = mode
+        self._touch_drill_freshness()
+        self._update_drill_mode_chip()
+        self._update_drill_activity_box()
+        return True
+
+    def _parse_drill_fault_line(self, line: str) -> bool:
+        """Parse fault indicators relevant to the drill system.
+
+        Currently detects heartbeat-timeout fault markers and clears the
+        heartbeat flag otherwise.  Returns ``True`` if a relevant drill
+        fault line was recognised.
+        """
+        upper = line.upper()
+        if "HEARTBEAT_TIMEOUT" in upper:
+            self._drill_state["heartbeat_fault"] = True
+            # Mark all drill parts as FAULT for visibility.
+            for p in self.DRILL_PARTS:
+                self._drill_state["parts"][p]["fault"] = "FAULT"
+            self._update_drill_table()
+            self._update_drill_activity_box()
+            return True
+        return False
+
+    def _drill_clear_heartbeat_fault(self):
+        """Clear the heartbeat-fault flag and reset per-part fault to OK."""
+        if self._drill_state["heartbeat_fault"]:
+            self._drill_state["heartbeat_fault"] = False
+            for p in self.DRILL_PARTS:
+                self._drill_state["parts"][p]["fault"] = "OK"
+            self._update_drill_table()
+            self._update_drill_activity_box()
 
     def _arm_parse_motors(self, line: str) -> bool:
         m = re.match(r"^M(\d)\s+DIR=(\w+)\s+PWM=(\d+)\s+BRAKE=(\w+)", line)
@@ -2168,31 +4031,33 @@ class EarendilControlGui(QMainWindow):
             self._arm_state.setdefault("J4", {})["dir_m5"] = dir_val
             self._arm_state.setdefault("J5", {})["pwm_m5"] = pwm_val
             self._arm_state.setdefault("J5", {})["dir_m5"] = dir_val
-        for wrist_joint in ("J4", "J5"):
-            st = self._arm_state[wrist_joint]
-            m4_pwm = int(st.get("pwm_m4", "0"))
-            m5_pwm = int(st.get("pwm_m5", "0"))
-            max_pwm = max(m4_pwm, m5_pwm)
-            self._set_arm_cell(wrist_joint, "PWM", str(max_pwm))
-            st["pwm"] = str(max_pwm)
-            m4_dir = st.get("dir_m4", "STOP")
-            m5_dir = st.get("dir_m5", "STOP")
-            if m4_dir == "STOP" and m5_dir == "STOP":
-                wrist_dir = "STOP"
-            elif wrist_joint == "J4":
-                if m4_dir == m5_dir:
-                    wrist_dir = m4_dir
-                else:
-                    wrist_dir = m4_dir
-            else:
-                if m4_dir != m5_dir:
-                    wrist_dir = m4_dir
-                else:
+        if motor_num in (4, 5):
+            for wrist_joint in ("J4", "J5"):
+                st = self._arm_state[wrist_joint]
+                m4_pwm = int(st.get("pwm_m4", "0"))
+                m5_pwm = int(st.get("pwm_m5", "0"))
+                max_pwm = max(m4_pwm, m5_pwm)
+                self._set_arm_cell(wrist_joint, "PWM", str(max_pwm))
+                st["pwm"] = str(max_pwm)
+                m4_dir = st.get("dir_m4", "STOP")
+                m5_dir = st.get("dir_m5", "STOP")
+                if m4_dir == "STOP" and m5_dir == "STOP":
                     wrist_dir = "STOP"
-            self._set_arm_cell(wrist_joint, "Dir", wrist_dir)
-            st["dir"] = wrist_dir
-            self._set_arm_cell(wrist_joint, "Brake", brake_display, brake_color)
-            st["brake"] = brake_display
+                elif wrist_joint == "J4":
+                    if m4_dir == m5_dir:
+                        wrist_dir = m4_dir
+                    else:
+                        wrist_dir = m4_dir
+                else:
+                    if m4_dir != m5_dir:
+                        wrist_dir = m4_dir
+                    else:
+                        wrist_dir = "STOP"
+                self._set_arm_cell(wrist_joint, "Dir", wrist_dir)
+                st["dir"] = wrist_dir
+                self._set_arm_cell(wrist_joint, "Brake", brake_display, brake_color)
+                st["brake"] = brake_display
+        self._touch_arm_freshness()
         return True
 
     def _arm_parse_sensors(self, line: str) -> bool:
@@ -2238,6 +4103,10 @@ class EarendilControlGui(QMainWindow):
                     else:
                         self._set_arm_cell(joint, "Limit", "OK", c["success_bright"])
                         self._arm_state[joint]["limit"] = "OK"
+            # F401 fault reports commonly also include SETTINGS_DIRTY / mode /
+            # heartbeat status fields on the same line.  Parse them here so
+            # the dialog status hint updates even on a single multi-key line.
+            self._arm_parse_fault_extras(line)
             return True
         m_bp = re.search(r"BRAKEPOINT_BITS=(\d+)", line)
         if m_bp:
@@ -2247,6 +4116,7 @@ class EarendilControlGui(QMainWindow):
                 if bp_active:
                     self._set_arm_cell(joint, "Fault", "BP", c["warning"])
                     self._arm_state[joint]["fault"] = "BP"
+            self._arm_parse_fault_extras(line)
             return True
         m_hb = re.search(r"HEARTBEAT_TIMEOUT", line)
         if m_hb:
@@ -2254,25 +4124,90 @@ class EarendilControlGui(QMainWindow):
             for joint in self.ARM_JOINTS:
                 self._set_arm_cell(joint, "Fault", "HB", c["danger"])
                 self._arm_state[joint]["fault"] = "HB"
+            self._arm_parse_fault_extras(line)
+            return True
+        # Fall-through: a fault report may include SETTINGS_DIRTY without
+        # LIMIT_BITS / BRAKEPOINT_BITS / HEARTBEAT_TIMEOUT.  Detect it here
+        # so the dialog status hint still updates for partial reports.
+        if "SETTINGS_DIRTY" in line:
+            self._arm_parse_fault_extras(line)
             return True
         return False
 
+    def _arm_parse_fault_extras(self, line: str):
+        """Parse extra fault report KEY=VALUE fields (SETTINGS_DIRTY etc).
+
+        Called whenever a fault report prefix matches.  Updates the open
+        ``ManipulationArmSettingsDialog`` (if any) with dirty / save hints.
+        Missing fields are silently ignored.
+        """
+        m_dirty = re.search(r"SETTINGS_DIRTY=(\d+)", line)
+        if m_dirty:
+            try:
+                dirty = int(m_dirty.group(1)) != 0
+            except ValueError:
+                dirty = False
+            dlg = self._arm_settings_dialog
+            if dlg is not None and dlg.isVisible():
+                if dirty:
+                    dlg.notify_settings_dirty()
+
     def _arm_parse_params(self, line: str) -> bool:
-        m = re.match(r"^J(\d)\s+STOPMODE=(\w+)", line)
+        """Parse F401 ``params`` output and update the GUI.
+
+        Firmware emits one line per joint shaped like:
+
+            J1 STOPMODE=BRAKE INVERT=0 MAXPWM=255 DEFAULT=100 \\
+                POSGAIN=1000 NEGGAIN=1000 DEAD=50 KP=800 KD=40 \\
+                MINPWM=60 TOL=2 MIN=-90 MAX=90 LIMITS=1 \\
+                BRAKEPOINT=OFF KEYFWD=-1 KEYBACK=-1 AS5600=2
+
+        Any subset of these keys is accepted; unknown / malformed keys are
+        silently ignored so a partial or extended F401 output cannot crash
+        the parser.  The existing Manipulation Arm Telemetry Stop column is
+        still updated (existing behaviour), and the open
+        ``ManipulationArmSettingsDialog`` (if any) is populated from the
+        parsed dict.
+        """
+        m = re.match(r"^J(\d)\s+(?P<rest>[\w=.\-]+(?:\s+[\w=.\-]+)*)\s*$", line)
         if not m:
             return False
         joint_num = int(m.group(1))
-        stopmode = m.group(2)
         joint = f"J{joint_num}"
         if joint not in self.ARM_JOINTS:
             return False
+        rest = m.group("rest")
+        # Split into KEY=VALUE tokens.  Tokens without ``=`` are ignored.
+        parsed: dict[str, str] = {}
+        for tok in rest.split():
+            if "=" not in tok:
+                continue
+            key, value = tok.split("=", 1)
+            key = key.strip().upper()
+            value = value.strip()
+            if key:
+                parsed[key] = value
+        if not parsed:
+            return False
+
         c = self._colors()
-        stop_map = {
-            "COAST": "COAST", "BRAKE": "BRAKE", "HOLD": "HOLD", "HYBRID": "HYB",
-        }
-        display = stop_map.get(stopmode, stopmode)
-        self._set_arm_cell(joint, "Stop", display)
-        self._arm_state[joint]["stop"] = display
+        stopmode = parsed.get("STOPMODE")
+        if stopmode:
+            stop_map = {
+                "COAST": "COAST", "BRAKE": "BRAKE", "HOLD": "HOLD",
+                "HYBRID": "HYB",
+            }
+            display = stop_map.get(stopmode.upper(), stopmode)
+            self._set_arm_cell(joint, "Stop", display)
+            self._arm_state[joint]["stop"] = display
+
+        # Persist the parsed dict and apply to the dialog if it is open.
+        per_joint = dict(parsed)
+        # Normalise KEYBACK->KEYBACK handling preserved as-is.
+        self._arm_params_cache[joint] = per_joint
+        dlg = self._arm_settings_dialog
+        if dlg is not None and dlg.isVisible():
+            dlg.apply_params({joint: per_joint})
         return True
 
     def _arm_update_fault_from_state(self):
@@ -2314,13 +4249,63 @@ class EarendilControlGui(QMainWindow):
 
     def _arm_process_rx(self, line: str):
         if self._arm_parse_sensors(line):
+            self._touch_arm_freshness()
             self._arm_update_fault_from_state()
+            # Mirror sensor status into the open Arm Settings dialog.
+            self._arm_settings_dialog_update_sensor(line)
             return
         if self._arm_parse_fault(line):
+            self._touch_arm_freshness()
             self._arm_update_fault_from_state()
             return
         if self._arm_parse_params(line):
+            self._touch_arm_freshness()
             return
+        # F401 save result / error detection for the Arm Settings dialog.
+        self._arm_settings_dialog_check_save(line)
+
+    def _arm_settings_dialog_update_sensor(self, line: str):
+        """Mirror SENSOR J<n> ... STATUS=... into the open Arm Settings dialog."""
+        dlg = self._arm_settings_dialog
+        if dlg is None or not dlg.isVisible():
+            return
+        m = re.search(r"J(\d)\s.*STATUS=(\w+)", line)
+        if not m:
+            return
+        joint = f"J{m.group(1)}"
+        status_val = m.group(2)
+        sens_map = {
+            "MAGNET_OK":     "OK",
+            "MAGNET_STRONG": "OK",
+            "MAGNET_WEAK":   "WEAK",
+            "NO_MAGNET":     "NO",
+        }
+        sens_text = sens_map.get(status_val, status_val)
+        if "ERR=READ_FAIL" in status_val:
+            sens_text = "ERR"
+        dlg.update_sensor_status(joint, sens_text)
+
+    def _arm_settings_dialog_check_save(self, line: str):
+        """Detect F401 save success / failure lines and notify the dialog.
+
+        Recognised strings (case-insensitive):
+            OK SAVED_FLASH                - save success, clears local dirty
+            ERR SAVE_REQUIRES_SAFE        - not in SAFE mode
+            ERR SAVE_REQUIRES_STOPPED     - motors still moving
+        """
+        dlg = self._arm_settings_dialog
+        if dlg is None or not dlg.isVisible():
+            return
+        upper = line.upper()
+        if "OK SAVED_FLASH" in upper:
+            self._log_info("[ARM-SAVE] OK SAVED_FLASH")
+            dlg.notify_save_success()
+        elif "ERR SAVE_REQUIRES_SAFE" in upper:
+            self._log_err("[ARM-SAVE] ERR SAVE_REQUIRES_SAFE")
+            dlg.notify_save_failure("ERR SAVE_REQUIRES_SAFE (move to SAFE mode first)")
+        elif "ERR SAVE_REQUIRES_STOPPED" in upper:
+            self._log_err("[ARM-SAVE] ERR SAVE_REQUIRES_STOPPED")
+            dlg.notify_save_failure("ERR SAVE_REQUIRES_STOPPED (stop all motors first)")
 
     def _update_motion_indicator(self, direction: str | None):
         """Update the Motion badge in Rover Status.  direction is one of W/S/A/D/T/Y/G/H or None for IDLE."""
@@ -2335,65 +4320,36 @@ class EarendilControlGui(QMainWindow):
         grp = QGroupBox("Console")
         lay = QVBoxLayout(grp)
 
-        console_splitter = QSplitter(Qt.Vertical)
-
-        # -- H7 Console ------------------------------------------------
-        h7_widget = QWidget()
-        h7_lay = QVBoxLayout(h7_widget)
-        h7_lay.setContentsMargins(0, 0, 0, 0)
-        h7_lay.setSpacing(4)
-
-        self._lbl_h7_console_title = QLabel("H7 Console")
-        self._lbl_h7_console_title.setStyleSheet(
+        # -- H7 Console -----------------------------------------------
+        lbl_h7 = QLabel("H7 Console")
+        lbl_h7.setStyleSheet(
             "color: #D4AF37; font-weight: bold; font-size: 13px;"
         )
-        h7_lay.addWidget(self._lbl_h7_console_title)
+        lay.addWidget(lbl_h7)
 
         self._h7_console = QTextEdit()
         self._h7_console.setReadOnly(True)
         self._h7_console.setStyleSheet(
             "QTextEdit { background-color: #0B0B0D; border: 1px solid #D4AF37; "
-            "border-radius: 4px; color: #C0C0C0; "
+            "border-radius: 4px; color: #D4AF37; "
             "font-family: 'Consolas', 'Courier New', monospace; font-size: 12px; }"
         )
-        h7_lay.addWidget(self._h7_console)
+        self._h7_console.document().setMaximumBlockCount(5000)
+        lay.addWidget(self._h7_console)
 
-        h7_input_lay = QHBoxLayout()
-        h7_input_lay.setContentsMargins(0, 0, 0, 0)
-        h7_input_lay.setSpacing(4)
-
-        self._h7_input = QLineEdit()
-        self._h7_input.setPlaceholderText("Type H7 command and press Enter...")
-        self._h7_input.setStyleSheet(
-            "QLineEdit { background-color: #2A2A31; border: 1px solid #D4AF37; "
-            "border-radius: 4px; padding: 4px 8px; color: #C0C0C0; }"
-        )
-        self._h7_input.returnPressed.connect(self._send_h7_input)
-        h7_input_lay.addWidget(self._h7_input)
-
-        self._btn_h7_send = QPushButton("Send")
-        self._btn_h7_send.setStyleSheet(
-            "QPushButton { background-color: #2A2A31; border: 1px solid #D4AF37; "
-            "border-radius: 6px; padding: 4px 14px; color: #D4AF37; font-weight: bold; }"
-            "QPushButton:hover { background-color: #3A3320; }"
-        )
-        self._btn_h7_send.clicked.connect(self._send_h7_input)
-        h7_input_lay.addWidget(self._btn_h7_send)
-
-        h7_lay.addLayout(h7_input_lay)
-        console_splitter.addWidget(h7_widget)
+        h7_btn_row = QHBoxLayout()
+        btn_clear_h7 = QPushButton("Clear H7 Console")
+        btn_clear_h7.clicked.connect(self._h7_console.clear)
+        h7_btn_row.addWidget(btn_clear_h7)
+        h7_btn_row.addStretch()
+        lay.addLayout(h7_btn_row)
 
         # -- GUI Console -----------------------------------------------
-        gui_widget = QWidget()
-        gui_lay = QVBoxLayout(gui_widget)
-        gui_lay.setContentsMargins(0, 0, 0, 0)
-        gui_lay.setSpacing(4)
-
         self._lbl_gui_console_title = QLabel("GUI Console")
         self._lbl_gui_console_title.setStyleSheet(
             "color: #8E8E93; font-weight: bold; font-size: 13px;"
         )
-        gui_lay.addWidget(self._lbl_gui_console_title)
+        lay.addWidget(self._lbl_gui_console_title)
 
         self._gui_console = QTextEdit()
         self._gui_console.setReadOnly(True)
@@ -2402,21 +4358,30 @@ class EarendilControlGui(QMainWindow):
             "border-radius: 4px; color: #8E8E93; "
             "font-family: 'Consolas', 'Courier New', monospace; font-size: 12px; }"
         )
-        gui_lay.addWidget(self._gui_console)
+        self._gui_console.document().setMaximumBlockCount(2000)
+        lay.addWidget(self._gui_console)
+
+        # -- H7 Command Input -----------------------------------------
+        cmd_row = QHBoxLayout()
+        self._cmd_input = QLineEdit()
+        self._cmd_input.setPlaceholderText("H7 command (e.g. magraw, help, i2cscan)")
+        self._cmd_input.setStyleSheet(
+            "QLineEdit { background-color: #0B0B0D; border: 1px solid #5F5A4A; "
+            "border-radius: 4px; color: #D4AF37; padding: 4px 8px; "
+            "font-family: 'Consolas', 'Courier New', monospace; font-size: 12px; }"
+        )
+        self._cmd_input.returnPressed.connect(self._on_cmd_send)
+        cmd_row.addWidget(self._cmd_input)
+
+        btn_send_cmd = QPushButton("Send")
+        btn_send_cmd.clicked.connect(self._on_cmd_send)
+        cmd_row.addWidget(btn_send_cmd)
+
+        lay.addLayout(cmd_row)
 
         btn_clear_gui = QPushButton("Clear GUI Console")
         btn_clear_gui.clicked.connect(self._gui_console.clear)
-        gui_lay.addWidget(btn_clear_gui)
-
-        console_splitter.addWidget(gui_widget)
-        console_splitter.setStretchFactor(0, 3)
-        console_splitter.setStretchFactor(1, 2)
-
-        lay.addWidget(console_splitter)
-
-        btn_clear_h7 = QPushButton("Clear H7 Console")
-        btn_clear_h7.clicked.connect(self._h7_console.clear)
-        lay.addWidget(btn_clear_h7)
+        lay.addWidget(btn_clear_gui)
 
         return grp
 
@@ -2427,11 +4392,11 @@ class EarendilControlGui(QMainWindow):
     #  Theme switching is purely visual.  _toggle_theme() flips self.current_theme,
     #  regenerates the stylesheet, restyles every theme-aware inline style and
     #  repaints dynamic widgets to match the current state - WITHOUT touching
-    #  runtime state (serial connection, values, operating mode, pending mode,
+        #  runtime state (connection, values, operating mode, pending mode,
     #  console contents, motor/IMU tables).
 
     def _toggle_theme(self):
-        """Switch between dark and light theme.  No serial I/O."""
+        """Switch between dark and light theme.  No network I/O."""
         self.current_theme = "light" if self.current_theme == "dark" else "dark"
         self._apply_theme()
         self._btn_theme.setText("Light Mode" if self.current_theme == "dark" else "Dark Mode")
@@ -2452,6 +4417,12 @@ class EarendilControlGui(QMainWindow):
         self._central.set_background_color(c['bg_main'])
         self._central.set_opacity(c['logo_opacity'])
 
+        # Ensure the main window palette background matches the theme so
+        # the QMainWindow background-color from the stylesheet is consistent.
+        pal = self.palette()
+        pal.setColor(self.backgroundRole(), QColor(c['bg_main']))
+        self.setPalette(pal)
+
         # -- Static (builder-set) widgets re-styled to the active theme --
         self._style_connection_button()
         self._style_connection_status()
@@ -2471,11 +4442,13 @@ class EarendilControlGui(QMainWindow):
         if hasattr(self, "_lbl_qs_motion"):
             self._update_motion_indicator(self._active_move_key)
         # Quick-status port badge + connection status label
-        if self.connected and self.ser and self.ser.port:
-            self._lbl_qs_port.setText(f"Port: {self.ser.port}")
+        if self._tcp_is_connected():
+            peer = self._tcp_socket.peerAddress().toString()
+            port = self._tcp_socket.peerPort()
+            self._lbl_qs_port.setText(f"Link: {peer}:{port}")
             self._lbl_qs_port.setStyleSheet(self._style_badge(c['accent_gold']))
         else:
-            self._lbl_qs_port.setText("Port: Disconnected")
+            self._lbl_qs_port.setText("Link: Disconnected")
             self._lbl_qs_port.setStyleSheet(self._style_badge(c['danger']))
         # Mode label + value label (RPM gold / DUTY amber)
         if hasattr(self, "_lbl_mode"):
@@ -2498,7 +4471,11 @@ class EarendilControlGui(QMainWindow):
     def _style_connection_button(self):
         """Style the Connect/Disconnect button for the active theme + state."""
         c = self._colors()
-        if self.connected:
+        state = (self._tcp_socket.state()
+                 if self._tcp_socket is not None
+                 else QAbstractSocket.UnconnectedState)
+        if state in (QAbstractSocket.ConnectedState,
+                     QAbstractSocket.ClosingState):
             self._btn_connect.setStyleSheet(
                 f"QPushButton {{ background-color: {c['danger']}; "
                 f"color: {c['text']}; }}"
@@ -2512,44 +4489,25 @@ class EarendilControlGui(QMainWindow):
     def _style_connection_status(self):
         """Style the * Connected / * Disconnected label."""
         c = self._colors()
-        color = c['accent_gold'] if self.connected else c['danger']
+        color = c['accent_gold'] if self._tcp_is_connected() else c['danger']
         self._lbl_status.setStyleSheet(
             f"color: {color}; font-weight: bold;"
         )
 
     def _style_console_widgets(self):
-        """Re-style the H7 console, GUI console, H7 input, Send button and
-        their section labels for the active theme."""
+        """Re-style the console widgets for the active theme."""
         c = self._colors()
 
-        self._h7_console.setStyleSheet(
-            f"QTextEdit {{ background-color: {c['bg_console']}; "
-            f"border: 1px solid {c['accent_gold']}; "
-            f"border-radius: 4px; color: {c['text']}; "
-            "font-family: 'Consolas', 'Courier New', monospace; font-size: 12px; }"
-        )
-
-        self._h7_input.setStyleSheet(
-            f"QLineEdit {{ background-color: {c['bg_input']}; "
-            f"border: 1px solid {c['accent_gold']}; "
-            f"border-radius: 4px; padding: 4px 8px; color: {c['text']}; }}"
-        )
-        # QLineEdit placeholder color is not settable via QSS portably; keep
-        # default (handled by palette inherited from Fusion + stylesheet text).
-
-        self._btn_h7_send.setStyleSheet(
-            f"QPushButton {{ background-color: {c['bg_input']}; "
-            f"border: 1px solid {c['accent_gold']}; "
-            f"border-radius: 6px; padding: 4px 14px; color: {c['accent_gold']}; "
-            f"font-weight: bold; }}"
-            f"QPushButton:hover {{ background-color: {c['selection_bg']}; }}"
-        )
-
-        # Keep references to the section labels so they can be re-themed.
-        if hasattr(self, "_lbl_h7_console_title"):
-            self._lbl_h7_console_title.setStyleSheet(
-                f"color: {c['accent_gold']}; font-weight: bold; font-size: 13px;"
+        # H7 Console
+        if hasattr(self, "_h7_console"):
+            self._h7_console.setStyleSheet(
+                f"QTextEdit {{ background-color: {c['bg_console']}; "
+                f"border: 1px solid #D4AF37; "
+                f"border-radius: 4px; color: #D4AF37; "
+                "font-family: 'Consolas', 'Courier New', monospace; font-size: 12px; }"
             )
+
+        # GUI Console
         if hasattr(self, "_lbl_gui_console_title"):
             self._lbl_gui_console_title.setStyleSheet(
                 f"color: {c['text_muted']}; font-weight: bold; font-size: 13px;"
@@ -2597,13 +4555,13 @@ class EarendilControlGui(QMainWindow):
             mode_color = c['accent_gold_bright']
             value_color = c['accent_gold_bright']
         self._lbl_mode.setStyleSheet(
-            f"color: {mode_color}; font-size: 16px; font-weight: bold;"
+            f"color: {mode_color}; font-size: 13px; font-weight: bold;"
         )
         self._lbl_fb_value.setStyleSheet(
-            f"color: {value_color}; font-size: 18px; font-weight: bold;"
+            f"color: {value_color}; font-size: 14px; font-weight: bold;"
         )
         self._lbl_rot_value.setStyleSheet(
-            f"color: {value_color}; font-size: 18px; font-weight: bold;"
+            f"color: {value_color}; font-size: 14px; font-weight: bold;"
         )
 
     def _style_turn_ratio_spinbox(self):
@@ -2615,7 +4573,7 @@ class EarendilControlGui(QMainWindow):
         self._spin_turn_ratio.setStyleSheet(
             f"QDoubleSpinBox {{ color: {color}; background-color: {bg}; "
             f"border: 1px solid {border}; border-radius: 4px; "
-            f"padding: 4px 8px; font-size: 18px; font-weight: bold; }}"
+            f"padding: 2px 4px; font-size: 13px; font-weight: bold; }}"
         )
 
     def _style_operating_mode_status(self, cfg: dict):
@@ -2662,18 +4620,6 @@ class EarendilControlGui(QMainWindow):
     #  Console Logging
     # ======================================================================
 
-    def _log_h7(self, prefix: str, text: str, color: str | None = None):
-        """Append a colored line to the H7 Console.  `color` defaults to the
-        active theme's text color so newly written lines match the theme."""
-        c = self._colors()
-        text_color = color if color is not None else c['text']
-        ts = time.strftime("%H:%M:%S")
-        self._h7_console.append(
-            f"<span style='color:{c['accent_gold']};'>[{ts}]</span> "
-            f"<span style='color:{text_color};'>{prefix} {text}</span>"
-        )
-        self._h7_console.moveCursor(QTextCursor.End)
-
     def _log_gui(self, prefix: str, text: str, color: str | None = None):
         """Append a colored line to the GUI Console.  `color` defaults to the
         active theme's muted-text color so newly written lines match the theme."""
@@ -2686,12 +4632,6 @@ class EarendilControlGui(QMainWindow):
         )
         self._gui_console.moveCursor(QTextCursor.End)
 
-    def _log_tx(self, cmd: str):
-        self._log_h7("[TX-H7]", cmd, self._colors()['accent_gold_bright'])
-
-    def _log_rx(self, text: str):
-        self._log_h7("[RX-H7]", text, self._colors()['text'])
-
     def _log_info(self, text: str):
         self._log_gui("[GUI]", text, self._colors()['text_muted'])
 
@@ -2702,139 +4642,501 @@ class EarendilControlGui(QMainWindow):
         self._log_gui("[GUI-WARN]", text, self._colors()['warning'])
 
     # ======================================================================
-    #  Serial Port Management
+    #  TCP Connection Management
     # ======================================================================
 
-    def _refresh_ports(self):
-        self._port_combo.clear()
-        ports = serial.tools.list_ports.comports()
-        for p in ports:
-            self._port_combo.addItem(p.device)
-        if not ports:
-            self._log_info("No serial ports found.")
+    def _init_tcp_socket(self):
+        """Create and configure the QTcpSocket."""
+        self._tcp_socket = QTcpSocket()
+        self._tcp_socket.connected.connect(self._on_tcp_connected)
+        self._tcp_socket.disconnected.connect(self._on_tcp_disconnected)
+        self._tcp_socket.readyRead.connect(self._on_tcp_ready_read)
+        self._tcp_socket.errorOccurred.connect(self._on_tcp_error)
+        self._tcp_socket.stateChanged.connect(self._on_tcp_state_changed)
+
+    def _tcp_is_connected(self) -> bool:
+        """Authoritative TCP connection check."""
+        return (self._tcp_socket is not None and
+                self._tcp_socket.state() == QAbstractSocket.ConnectedState)
+
+    def _is_current_tcp_session(self, session_id: int) -> bool:
+        """Check whether *session_id* still matches the active TCP session.
+
+        A physical ``ConnectedState`` check alone cannot distinguish an old
+        session from a new one after a rapid reconnect.  This helper adds
+        the generation check so stale callbacks are silently dropped.
+        """
+        return (
+            session_id == self._tcp_session_id
+            and self._tcp_is_connected()
+        )
 
     def _toggle_connection(self):
-        if self.connected:
+        """Dispatch the connection button from the real QTcpSocket state."""
+        state = self._tcp_socket.state()
+        if state == QAbstractSocket.UnconnectedState:
+            self._tcp_connect()
+        elif state in (QAbstractSocket.HostLookupState,
+                       QAbstractSocket.ConnectingState):
+            self._cancel_tcp_connect()
+        elif state == QAbstractSocket.ConnectedState:
             self._disconnect()
+        # ClosingState deliberately ignores extra clicks.  The state-driven
+        # UI disables the button while closure is in progress.
+
+    def _tcp_connect(self):
+        if (self._tcp_socket is None or
+                self._tcp_socket.state() != QAbstractSocket.UnconnectedState):
+            return
+
+        host = self._host_edit.text().strip()
+        port = self._port_spin.value()
+        if not host:
+            self._log_warn("No host specified.")
+            return
+
+        self._log_info(f"Connecting to {host}:{port}...")
+        self._lbl_status.setText("Status: CONNECTING")
+        self._lbl_status.setStyleSheet(
+            f"color: {self._colors()['warning']}; font-weight: bold;"
+        )
+        self._tcp_rx_buffer.clear()
+        self._tcp_session_id += 1
+        self._tcp_attempt_session_id = self._tcp_session_id
+        self._tcp_connected_session_id = None
+        self._tcp_teardown_session_id = None
+        self._tcp_teardown_reason = None
+        self._tcp_teardown_detail = None
+        self._tcp_prepared_session_id = None
+        self._tcp_connect_timer.start()
+        self._tcp_socket.connectToHost(host, port)
+
+    def _begin_tcp_teardown(self, reason: str, detail: str | None = None) -> int:
+        """Assign one reason and invalidate one active attempt/session once."""
+        if self._tcp_teardown_reason is not None:
+            if self._tcp_teardown_session_id is not None:
+                return self._tcp_teardown_session_id
+            return self._tcp_session_id
+
+        session_id = self._tcp_attempt_session_id
+        if session_id is None:
+            session_id = self._tcp_session_id
+        self._tcp_teardown_reason = reason
+        self._tcp_teardown_detail = detail
+        self._tcp_teardown_session_id = session_id
+        self._tcp_session_id += 1
+        return session_id
+
+    def _cancel_tcp_connect(self):
+        """Cancel a lookup/connection attempt without sending a rover stop."""
+        if self._tcp_socket.state() not in (
+                QAbstractSocket.HostLookupState,
+                QAbstractSocket.ConnectingState):
+            return
+        session_id = self._begin_tcp_teardown(self.TCP_USER_CANCEL)
+        self._tcp_connect_timer.stop()
+        self._prepare_for_disconnect()
+        self._tcp_rx_buffer.clear()
+        self._tcp_socket.abort()
+        self._finalize_tcp_disconnected(self.TCP_USER_CANCEL, session_id)
+
+    def _on_tcp_connect_timeout(self):
+        if (self._tcp_teardown_reason is not None or
+                self._tcp_socket.state() not in (
+                    QAbstractSocket.HostLookupState,
+                    QAbstractSocket.ConnectingState)):
+            return
+        session_id = self._begin_tcp_teardown(self.TCP_CONNECT_TIMEOUT)
+        self._tcp_connect_timer.stop()
+        self._prepare_for_disconnect()
+        self._tcp_rx_buffer.clear()
+        self._tcp_socket.abort()
+        self._finalize_tcp_disconnected(self.TCP_CONNECT_TIMEOUT, session_id)
+
+    def _on_tcp_connected(self):
+        attempt_id = self._tcp_attempt_session_id
+        valid = (
+            self._tcp_socket.state() == QAbstractSocket.ConnectedState
+            and attempt_id is not None
+            and attempt_id == self._tcp_session_id
+            and self._tcp_teardown_reason is None
+            and self._tcp_finalized_session_id != attempt_id
+        )
+        if not valid:
+            if self._tcp_teardown_reason is None:
+                session_id = self._begin_tcp_teardown(
+                    self.TCP_STALE_CONNECT)
+            else:
+                session_id = self._tcp_teardown_session_id
+            self._tcp_connect_timer.stop()
+            self._prepare_for_disconnect()
+            if self._tcp_socket.state() != QAbstractSocket.UnconnectedState:
+                self._tcp_socket.abort()
+            self._finalize_tcp_disconnected(
+                self._tcp_teardown_reason or self.TCP_STALE_CONNECT,
+                session_id)
+            return
+
+        self._tcp_connect_timer.stop()
+        self._tcp_connected_session_id = attempt_id
+        self.connected = True
+
+        # Set socket options
+        try:
+            self._tcp_socket.setSocketOption(
+                QAbstractSocket.LowDelayOption, 1)
+        except Exception:
+            pass
+        try:
+            self._tcp_socket.setSocketOption(
+                QAbstractSocket.KeepAliveOption, 1)
+        except Exception:
+            pass
+
+        host = self._tcp_socket.peerAddress().toString()
+        port = self._tcp_socket.peerPort()
+        self._lbl_status.setText("Status: CONNECTED")
+        self._lbl_status.setStyleSheet(
+            f"color: {self._colors()['success_bright']}; font-weight: bold;"
+        )
+        self._btn_connect.setText("Disconnect")
+        self._style_connection_button()
+        self._lbl_qs_port.setText(f"Link: {host}:{port}")
+        self._lbl_qs_port.setStyleSheet(
+            self._style_badge(self._colors()['accent_gold']))
+        self._log_info(f"Connected to {host}:{port}")
+
+        # Start heartbeat — send one immediately, then periodically
+        self._h7_link_status = "UNKNOWN"
+        self._update_h7_link_badge()
+        self._send_heartbeat()
+        self._heartbeat_timer.start()
+        # Query link status several times after the first heartbeat.  Each
+        # callback captures this connection generation and is invalidated by
+        # disconnect/reconnect before it is allowed to write.
+        sid = self._tcp_session_id
+        self._start_linkstat_retries(sid)
+
+        # Start freshness tracking for new session
+        self._reset_freshness_timestamps()
+        self._freshness_timer.start()
+
+    def _on_tcp_disconnected(self):
+        if self._tcp_teardown_reason is None:
+            session_id = self._begin_tcp_teardown(self.TCP_REMOTE_CLOSE)
         else:
-            self._connect()
+            session_id = self._tcp_teardown_session_id
+        self._finalize_tcp_disconnected(
+            self._tcp_teardown_reason or self.TCP_REMOTE_CLOSE,
+            session_id)
 
-    def _connect(self):
-        port = self._port_combo.currentText()
-        if not port:
-            self._log_warn("No port selected.")
+    def _on_tcp_ready_read(self):
+        data = self._tcp_socket.readAll()
+        if not data:
+            return
+        self._tcp_rx_buffer.extend(data)
+
+        # Guard against buffer overflow
+        if len(self._tcp_rx_buffer) > MAX_TCP_RX_BUFFER_SIZE:
+            detail = "TCP RX buffer overflow — aborting connection."
+            session_id = self._begin_tcp_teardown(
+                self.TCP_RX_OVERFLOW, detail)
+            reason = self._tcp_teardown_reason or self.TCP_RX_OVERFLOW
+            self._prepare_for_disconnect()
+            self._tcp_rx_buffer.clear()
+            self._tcp_socket.abort()
+            self._finalize_tcp_disconnected(
+                reason, session_id)
             return
 
-        try:
-            baud = int(self._baud_edit.text())
-        except ValueError:
-            self._log_err("Invalid baudrate.")
+        # Extract complete lines
+        while b"\n" in self._tcp_rx_buffer:
+            line_bytes, self._tcp_rx_buffer = self._tcp_rx_buffer.split(b"\n", 1)
+            line_bytes = line_bytes.rstrip(b"\r")
+            if not line_bytes:
+                continue
+            text = line_bytes.decode("utf-8", errors="replace")
+            if text:
+                self._on_rx_line(text)
+
+    def _on_tcp_error(self, error):
+        # Any error emitted by an already-classified local teardown is an
+        # expected consequence of disconnectFromHost()/abort().
+        if self._tcp_teardown_reason is not None:
             return
 
-        try:
-            self.ser = serial.Serial(port, baud, timeout=0.05)
-            self.connected = True
+        if error == QAbstractSocket.RemoteHostClosedError:
+            session_id = self._begin_tcp_teardown(self.TCP_REMOTE_CLOSE)
+            self._prepare_for_disconnect()
+            if self._tcp_socket.state() == QAbstractSocket.UnconnectedState:
+                self._finalize_tcp_disconnected(
+                    self.TCP_REMOTE_CLOSE, session_id)
+            return
 
-            self.reader_thread = SerialReaderThread(self.ser)
-            self.reader_thread.line_received.connect(self._on_rx_line)
-            self.reader_thread.error_occurred.connect(
-                lambda e: self._log_err(f"Reader: {e}")
-            )
-            self.reader_thread.disconnected.connect(self._handle_disconnect)
-            self.reader_thread.start()
+        detail = self._tcp_socket.errorString()
+        session_id = self._begin_tcp_teardown(
+            self.TCP_SOCKET_ERROR, detail)
+        self._prepare_for_disconnect()
+        self._tcp_rx_buffer.clear()
+        self._tcp_socket.abort()
+        self._finalize_tcp_disconnected(
+            self.TCP_SOCKET_ERROR, session_id)
 
-            self._lbl_status.setText("* Connected")
-            self._style_connection_status()
-            self._btn_connect.setText("Disconnect")
-            self._style_connection_button()
-            self._port_combo.setEnabled(False)
-            self._baud_edit.setEnabled(False)
+    def _on_tcp_state_changed(self, state):
+        """Render connection controls from QTcpSocket state only."""
+        if state == QAbstractSocket.UnconnectedState:
+            text, enabled, fields_enabled = "Connect", True, True
+        elif state in (QAbstractSocket.HostLookupState,
+                       QAbstractSocket.ConnectingState):
+            text, enabled, fields_enabled = "Cancel", True, False
+        elif state == QAbstractSocket.ConnectedState:
+            text, enabled, fields_enabled = "Disconnect", True, False
+        else:  # ClosingState (and any future non-interactive state)
+            text, enabled, fields_enabled = "Disconnecting...", False, False
 
-            self._log_info(f"Connected to {port} @ {baud}")
-            self._lbl_qs_port.setText(f"Port: {port}")
-            self._lbl_qs_port.setStyleSheet(self._style_badge(self._colors()['accent_gold']))
-            self._arm_start_polling()
-        except Exception as e:
-            self._log_err(f"Connect failed: {e}")
+        self._btn_connect.setText(text)
+        self._btn_connect.setEnabled(enabled)
+        self._host_edit.setEnabled(fields_enabled)
+        self._port_spin.setEnabled(fields_enabled)
+        self._style_connection_button()
 
-    def _disconnect(self):
-        self._stop_reader()
-        self._close_serial()
-        self._set_disconnected_ui()
-        self._log_info("Disconnected.")
+    def _prepare_for_disconnect(self, *, stop_link_timers: bool = True):
+        """Stop command producers once for the ending attempt/session.
 
-    def _handle_disconnect(self):
-        """Called from reader thread on unexpected disconnect."""
-        self._close_serial()
-        self._set_disconnected_ui()
-        self._log_warn("Connection lost.")
+        Controlled user/window disconnect may defer stopping heartbeat until
+        after the best-effort stop has been queued.  Finalization calls this
+        again safely and ensures link timers are stopped.
+        """
+        session_id = self._tcp_teardown_session_id
+        if session_id is None:
+            session_id = self._tcp_attempt_session_id
+        if session_id is None:
+            session_id = self._tcp_session_id
 
-    def _stop_reader(self):
-        if self.reader_thread:
-            self.reader_thread.stop()
-            self.reader_thread = None
+        if self._tcp_prepared_session_id != session_id:
+            self._tcp_prepared_session_id = session_id
+            self._reset_input_state(send_stop=False)
+            self._pending_mode = None
+            self._pending_mode_timer.stop()
+            if (self._tuning_send_timer.isActive() or
+                    self._tuning_send_queue):
+                self._tuning_send_timer.stop()
+                self._tuning_send_queue.clear()
+                if self._tuning_dialog_ref is not None:
+                    try:
+                        self._tuning_dialog_ref._set_send_buttons_enabled(True)
+                    except Exception:
+                        pass
+                    self._tuning_dialog_ref = None
+            if self._cfgread_motor is not None:
+                dlg = self._cfgread_dialog
+                if dlg is not None:
+                    try:
+                        dlg._set_read_status(
+                            self._cfgread_motor, "Disconnected", success=False)
+                    except Exception:
+                        pass
+            self._cfgread_cleanup()
+            self._arm_stop_polling()
+            self._drill_stop_polling()
+            self._freshness_timer.stop()
 
-    def _close_serial(self):
-        if self.ser and self.ser.is_open:
-            try:
-                self.ser.close()
-            except Exception:
-                pass
-        self.ser = None
-        self.connected = False
+        if stop_link_timers:
+            self._stop_link_timers()
 
     def _set_disconnected_ui(self):
-        self._reset_input_state(send_stop=False)
+        """Render disconnected badges; lifecycle cleanup lives elsewhere."""
+        self._lbl_status.setText("Status: DISCONNECTED")
+        self._lbl_status.setStyleSheet(
+            f"color: {self._colors()['danger']}; font-weight: bold;"
+        )
+        self._lbl_qs_port.setText("Link: Disconnected")
+        self._lbl_qs_port.setStyleSheet(
+            self._style_badge(self._colors()['danger']))
+        self._on_tcp_state_changed(self._tcp_socket.state())
+
+    def _finalize_tcp_disconnected(
+            self, reason: str, session_id: int | None = None) -> bool:
+        """Finalize one attempt/session once and emit its one final log."""
+        if session_id is None:
+            session_id = self._tcp_teardown_session_id
+        if session_id is None:
+            session_id = self._tcp_attempt_session_id
+        if session_id is None:
+            session_id = self._tcp_session_id
+        if self._tcp_finalized_session_id == session_id:
+            return False
+
+        self._tcp_finalized_session_id = session_id
+        self._tcp_connect_timer.stop()
+        self._prepare_for_disconnect()
+        self._tcp_rx_buffer.clear()
         self.connected = False
-        # A pending mode change can never be confirmed while disconnected.
-        self._pending_mode = None
-        if self._pending_mode_timer.isActive():
-            self._pending_mode_timer.stop()
-        if self._tuning_send_timer.isActive():
-            self._tuning_send_timer.stop()
-            self._tuning_send_queue.clear()
-            if self._tuning_dialog_ref is not None:
-                try:
-                    self._tuning_dialog_ref._set_send_buttons_enabled(True)
-                except Exception:
-                    pass
-                self._tuning_dialog_ref = None
-        # Cancel any pending cfgread
-        if self._cfgread_motor is not None:
-            dlg = self._cfgread_dialog
-            if dlg is not None:
-                try:
-                    dlg._set_read_status(
-                        self._cfgread_motor, "Disconnected", success=False)
-                except Exception:
-                    pass
-            self._cfgread_cleanup()
-        self._arm_stop_polling()
-        self._lbl_status.setText("* Disconnected")
-        self._style_connection_status()
-        self._btn_connect.setText("Connect")
-        self._style_connection_button()
-        self._port_combo.setEnabled(True)
-        self._baud_edit.setEnabled(True)
-        self._lbl_qs_port.setText("Port: Disconnected")
-        self._lbl_qs_port.setStyleSheet(self._style_badge(self._colors()['danger']))
+        self._tcp_connected_session_id = None
+        self._h7_link_status = "UNKNOWN"
+        self._update_h7_link_badge()
+        self._mark_all_freshness_disconnected()
+        self._set_disconnected_ui()
+
+        if not self._window_closing:
+            if reason == self.TCP_USER_DISCONNECT:
+                self._log_info("Disconnected by user.")
+            elif reason == self.TCP_USER_CANCEL:
+                self._log_info("Connection attempt cancelled.")
+            elif reason == self.TCP_CONNECT_TIMEOUT:
+                self._log_err("Connection timed out.")
+            elif reason == self.TCP_SOCKET_ERROR:
+                detail = self._tcp_teardown_detail or "Unknown socket error"
+                self._log_err(f"TCP error: {detail}")
+            elif reason == self.TCP_REMOTE_CLOSE:
+                self._log_warn("Connection lost.")
+            elif reason in (self.TCP_RX_OVERFLOW, self.TCP_TX_OVERFLOW):
+                self._log_err(self._tcp_teardown_detail or "TCP overflow")
+            # STALE_CONNECT and WINDOW_CLOSE are intentionally silent.
+
+        self._tcp_attempt_session_id = None
+        return True
+
+    def _disconnect(self):
+        """Request a controlled disconnect and let Qt finalize it."""
+        if self._tcp_socket.state() != QAbstractSocket.ConnectedState:
+            return
+        session_id = self._begin_tcp_teardown(self.TCP_USER_DISCONNECT)
+        self._prepare_for_disconnect(stop_link_timers=False)
+        self._send_cmd("stop")
+        self._stop_link_timers()
+        self._tcp_connect_timer.stop()
+        if self._tcp_socket.state() == QAbstractSocket.ConnectedState:
+            self._tcp_socket.flush()
+            self._tcp_socket.disconnectFromHost()
+        if self._tcp_socket.state() == QAbstractSocket.UnconnectedState:
+            self._finalize_tcp_disconnected(
+                self.TCP_USER_DISCONNECT, session_id)
 
     # ======================================================================
-    #  Serial Receive
+    #  TCP Receive
     # ======================================================================
+
+    def _update_h7_link_badge(self):
+        """Update the H7 Control Link badge in Rover Status."""
+        if not hasattr(self, "_lbl_qs_h7_link"):
+            return
+        c = self._colors()
+        status = self._h7_link_status
+        if status == "ALIVE":
+            color = c['success_bright']
+        elif status == "TIMEOUT":
+            color = c['danger_bright']
+        else:
+            color = c['text_muted']
+        self._lbl_qs_h7_link.setText(f"H7 Control Link: {status}")
+        self._lbl_qs_h7_link.setStyleSheet(self._style_badge(color))
+
+    def _query_linkstat(self):
+        """Send a diagnostic-only linkstat query; this is not a keepalive."""
+        if self._tcp_is_connected():
+            self._send_cmd("linkstat", track_arm=False)
+
+    def _stop_link_timers(self):
+        """Stop the heartbeat and every pending link-status retry timer."""
+        self._heartbeat_timer.stop()
+        for timer in self._linkstat_retry_timers:
+            timer.stop()
+            if timer.property("tcp_linkstat_connected"):
+                try:
+                    timer.timeout.disconnect()
+                except (RuntimeError, TypeError):
+                    pass
+                timer.setProperty("tcp_linkstat_connected", False)
+
+    def _start_linkstat_retries(self, session_id: int):
+        """Arm the configured session-guarded diagnostic status retries."""
+        for timer in self._linkstat_retry_timers:
+            timer.stop()
+            if timer.property("tcp_linkstat_connected"):
+                try:
+                    timer.timeout.disconnect()
+                except (RuntimeError, TypeError):
+                    pass
+                timer.setProperty("tcp_linkstat_connected", False)
+            timer.timeout.connect(
+                lambda sid=session_id: self._query_linkstat_for_session(sid))
+            timer.setProperty("tcp_linkstat_connected", True)
+            timer.start()
+
+    def _query_linkstat_for_session(self, session_id: int):
+        """Session-guarded linkstat query — dropped if session changed."""
+        if self._is_current_tcp_session(session_id):
+            self._send_cmd("linkstat", track_arm=False)
+
+    def _parse_pc_link_line(self, line: str) -> bool:
+        """Parse H7 PC-link watchdog log lines and update link-status badge.
+
+        Recognized formats:
+            [ERROR] [PC_LINK] TIMEOUT,AGE_MS:2000,ACTION:STOP_DISARM
+            [INFO] [PC_LINK] RECOVERED
+            PC_LINK,SEEN:1,ALIVE:1,TIMEOUT:0,AGE_MS:123,LIMIT_MS:2000
+        """
+        status = _parse_pc_link_status(line)
+        if status is None:
+            return False
+        self._h7_link_status = status
+        self._update_h7_link_badge()
+        return True
 
     def _on_rx_line(self, line: str):
-        self._log_rx(line)
+        # Show every H7 line in the H7 console
+        if hasattr(self, "_h7_console"):
+            self._h7_console.append(line)
+            self._h7_console.moveCursor(QTextCursor.End)
+
+        # Motor telemetry is exclusive — a [TEL][FL] line must not also
+        # update arm or drill tables.
         if self._parse_motor_telemetry_line(line):
-            pass  # telemetry handled
-        else:
-            self._parse_rx_for_motor_state(line)
+            self._parse_uart_error_line(line)
+            return
+
+        # Link-lost / recovered is orthogonal state that may accompany
+        # other content, so always run it.
+        self._parse_rx_for_motor_state(line)
         self._parse_uart_error_line(line)
-        self._parse_operating_mode_confirm(line)
-        self._parse_imu_line(line)
-        self._parse_cfgcache_line(line)
-        self._arm_parse_motors(line)
-        self._arm_process_rx(line)
+
+        # Operating-mode confirmation is exclusive.
+        if self._parse_operating_mode_confirm(line):
+            return
+
+        # PC_LINK diagnostic is exclusive.
+        if self._parse_pc_link_line(line):
+            return
+
+        # Exact H7 stream confirmations are state records, not telemetry.
+        if self._parse_imu_stream_line(line):
+            return
+
+        # IMU / MAG telemetry is exclusive.
+        if self._parse_imu_line(line):
+            return
+
+        # cfgcache parsing is exclusive.
+        if self._parse_cfgcache_line(line):
+            return
+
+        # UART8 records are normalized once at the protocol boundary.  All H7
+        # parsing above deliberately used the original raw logger line.
+        arm_payload = _extract_arm_rx_payload(line)
+        if arm_payload is None:
+            return
+
+        # Arm motor telemetry (M1-M3, M6) — may overlap with drill for M4/M5.
+        # Both parsers are tolerant: they check motor tags and return False
+        # for non-matching lines, so running both is safe.
+        self._arm_parse_motors(arm_payload)
+        self._arm_process_rx(arm_payload)
+
+        # Drill telemetry parsers.
+        self._parse_drill_get_motors_line(arm_payload)
+        self._parse_drill_mode_line(arm_payload)
+        self._parse_drill_fault_line(arm_payload)
 
     def _parse_rx_for_motor_state(self, line: str):
         """Update Link column if link-lost/recovered detected."""
@@ -2842,11 +5144,13 @@ class EarendilControlGui(QMainWindow):
         link_col = self.MOTOR_COL["link"]
         for tag, row in self.MOTOR_ROW.items():
             if f"link_lost][{tag}" in lower:
+                self._motor_link_state[tag] = "LOST"
                 item = self._motor_table.item(row, link_col)
                 if item:
                     item.setText("LOST")
                     item.setForeground(QColor(self._colors()["danger"]))
             if f"link_recovered][{tag}" in lower:
+                self._motor_link_state[tag] = "OK"
                 item = self._motor_table.item(row, link_col)
                 if item:
                     item.setText("OK")
@@ -2942,12 +5246,514 @@ class EarendilControlGui(QMainWindow):
 
         return False
 
+    # ======================================================================
+    #  Telemetry Freshness Tracking
+    # ======================================================================
+
+    def _set_imu_stream_state(self, state: str):
+        """Store and render the main window's authoritative stream state."""
+        self._imu_stream_state = state
+        dlg = self._imu_settings_dialog
+        if dlg is not None:
+            dlg.update_stream_status(state)
+
+    def _set_shared_imu_mag_expectation(self, expected: bool | None,
+                                        *, restart: bool = False):
+        """Set expectation for the H7 stream shared by MPU and MAG.
+
+        The timestamps remain independent even though the command controlling
+        their periodic production is shared.
+        """
+        now = time.monotonic()
+        for key in ("IMU", "MAG"):
+            if expected is True:
+                if restart or self._telemetry_expected.get(key) is not True:
+                    self._telemetry_expected_since[key] = now
+            else:
+                self._telemetry_expected_since[key] = 0.0
+            self._telemetry_expected[key] = expected
+        if restart:
+            self._freshness_imu = 0.0
+            self._freshness_mag = 0.0
+        if expected is not True or restart:
+            self._freshness_imu_stale = False
+            self._freshness_mag_stale = False
+
+    def _clear_sensor_one_shots(self):
+        self._imu_one_shot_session_id = None
+        self._imu_one_shot_deadline = 0.0
+        self._mag_one_shot_session_id = None
+        self._mag_one_shot_deadline = 0.0
+
+    def _clear_imu_stream_detection(self):
+        """Clear passive stream evidence from any TCP session."""
+        self._imu_stream_detect_session_id = None
+        self._imu_stream_detect_first_rx = 0.0
+        self._imu_stream_detect_count = 0
+        self._imu_stream_detect_suppress_session_id = None
+        self._imu_stream_detect_suppress_until = 0.0
+
+    def _expire_imu_stream_detection(self, now: float):
+        """Discard an incomplete passive-detection sequence without logging."""
+        if (self._imu_stream_detect_suppress_session_id is not None and
+                (not self._is_current_tcp_session(
+                    self._imu_stream_detect_suppress_session_id) or
+                 now >= self._imu_stream_detect_suppress_until)):
+            self._imu_stream_detect_suppress_session_id = None
+            self._imu_stream_detect_suppress_until = 0.0
+        if self._imu_stream_detect_count <= 0:
+            return
+        if (self._imu_stream_state != self.IMU_STREAM_UNKNOWN or
+                not self._is_current_tcp_session(
+                    self._imu_stream_detect_session_id) or
+                (now - self._imu_stream_detect_first_rx) * 1000.0 >
+                IMU_STREAM_AUTODETECT_MAX_GAP_MS):
+            self._clear_imu_stream_detection()
+
+    def _observe_imu_stream_candidate(self, now: float):
+        """Use repeated unsolicited valid MPU_IMU records to detect streaming."""
+        session_id = self._tcp_session_id
+        if (not self._is_current_tcp_session(session_id) or
+                self._imu_stream_state != self.IMU_STREAM_UNKNOWN or
+                self._imu_one_shot_session_id is not None):
+            return
+        if (self._imu_stream_detect_suppress_session_id == session_id and
+                now < self._imu_stream_detect_suppress_until):
+            return
+        if self._imu_stream_detect_suppress_session_id is not None:
+            self._imu_stream_detect_suppress_session_id = None
+            self._imu_stream_detect_suppress_until = 0.0
+
+        gap_ms = ((now - self._imu_stream_detect_first_rx) * 1000.0
+                  if self._imu_stream_detect_first_rx > 0.0 else 0.0)
+        if (self._imu_stream_detect_session_id != session_id or
+                self._imu_stream_detect_count <= 0 or
+                gap_ms > IMU_STREAM_AUTODETECT_MAX_GAP_MS):
+            self._imu_stream_detect_session_id = session_id
+            self._imu_stream_detect_first_rx = now
+            self._imu_stream_detect_count = 1
+            return
+
+        self._imu_stream_detect_count += 1
+        if self._imu_stream_detect_count < IMU_STREAM_AUTODETECT_MIN_PACKETS:
+            return
+
+        first_rx = self._imu_stream_detect_first_rx
+        self._clear_imu_stream_detection()
+        self._telemetry_expected["IMU"] = True
+        self._telemetry_expected["MAG"] = True
+        self._telemetry_expected_since["IMU"] = first_rx
+        self._telemetry_expected_since["MAG"] = (
+            self._freshness_mag if self._freshness_mag > 0.0 else now)
+        self._freshness_imu_stale = False
+        self._freshness_mag_stale = False
+        self._set_imu_stream_state(self.IMU_STREAM_ON)
+        self._update_freshness_ui()
+        self._log_info("Existing H7 IMU stream detected")
+
+    def _reset_sensor_session_state(self, *, update_ui: bool = True):
+        """Clear all session-local IMU/MAG intent and freshness state."""
+        self._set_imu_stream_state(self.IMU_STREAM_UNKNOWN)
+        self._set_shared_imu_mag_expectation(None)
+        self._freshness_imu = 0.0
+        self._freshness_mag = 0.0
+        self._freshness_imu_stale = False
+        self._freshness_mag_stale = False
+        self._clear_sensor_one_shots()
+        self._clear_imu_stream_detection()
+        if update_ui:
+            self._update_freshness_ui()
+
+    def _request_imu_stream_on(self) -> bool:
+        """Request the H7 shared MPU/MAG stream for the current TCP session."""
+        session_id = self._tcp_session_id
+        if not self._is_current_tcp_session(session_id):
+            return False
+        if not self._send_cmd("imu stream on"):
+            return False
+        if not self._is_current_tcp_session(session_id):
+            return False
+
+        self._clear_sensor_one_shots()
+        self._clear_imu_stream_detection()
+        self._set_imu_stream_state(self.IMU_STREAM_STARTING)
+        self._set_shared_imu_mag_expectation(True, restart=True)
+        self._update_freshness_ui()
+        return True
+
+    def _request_imu_stream_off(self) -> bool:
+        """Request stream stop and make both sensors immediately IDLE."""
+        session_id = self._tcp_session_id
+        if not self._is_current_tcp_session(session_id):
+            return False
+        if not self._send_cmd("imu stream off"):
+            return False
+        if not self._is_current_tcp_session(session_id):
+            return False
+
+        self._clear_sensor_one_shots()
+        self._clear_imu_stream_detection()
+        self._set_imu_stream_state(self.IMU_STREAM_STOPPING)
+        self._set_shared_imu_mag_expectation(False)
+        self._update_freshness_ui()
+        return True
+
+    def _request_imu_one_shot(self, command: str) -> bool:
+        """Send one of the H7's bounded one-shot MPU read commands."""
+        if command not in ("mpuraw", "mpuconv"):
+            return False
+        session_id = self._tcp_session_id
+        if not self._is_current_tcp_session(session_id):
+            return False
+        if not self._send_cmd(command):
+            return False
+        if not self._is_current_tcp_session(session_id):
+            return False
+        self._clear_imu_stream_detection()
+        self._imu_one_shot_session_id = session_id
+        self._imu_one_shot_deadline = (
+            time.monotonic() + SENSOR_ONE_SHOT_TIMEOUT_MS / 1000.0)
+        return True
+
+    def _request_mag_one_shot(self, command: str) -> bool:
+        """Send one of the H7's bounded one-shot magnetometer reads."""
+        if command not in ("magraw", "magimu"):
+            return False
+        session_id = self._tcp_session_id
+        if not self._is_current_tcp_session(session_id):
+            return False
+        if not self._send_cmd(command):
+            return False
+        if not self._is_current_tcp_session(session_id):
+            return False
+        self._mag_one_shot_session_id = session_id
+        self._mag_one_shot_deadline = (
+            time.monotonic() + SENSOR_ONE_SHOT_TIMEOUT_MS / 1000.0)
+        return True
+
+    def _expire_sensor_one_shots(self, now: float):
+        """Expire pending one-shot response windows without creating STALE."""
+        if (self._imu_one_shot_session_id is not None and
+                (not self._is_current_tcp_session(
+                    self._imu_one_shot_session_id) or
+                 now >= self._imu_one_shot_deadline)):
+            self._imu_one_shot_session_id = None
+            self._imu_one_shot_deadline = 0.0
+        if (self._mag_one_shot_session_id is not None and
+                (not self._is_current_tcp_session(
+                    self._mag_one_shot_session_id) or
+                 now >= self._mag_one_shot_deadline)):
+            self._mag_one_shot_session_id = None
+            self._mag_one_shot_deadline = 0.0
+
+    def _parse_imu_stream_line(self, line: str) -> bool:
+        """Apply one anchored H7 ``IMU_STREAM`` confirmation record."""
+        enabled = _parse_imu_stream_status(line)
+        if enabled is None:
+            return False
+        self._clear_imu_stream_detection()
+        if enabled:
+            self._set_shared_imu_mag_expectation(True)
+            self._freshness_imu_stale = False
+            self._freshness_mag_stale = False
+            self._set_imu_stream_state(self.IMU_STREAM_ON)
+        else:
+            self._set_shared_imu_mag_expectation(False)
+            self._set_imu_stream_state(self.IMU_STREAM_OFF)
+        self._update_freshness_ui()
+        return True
+
+    def _reset_freshness_timestamps(self):
+        """Reset all freshness timestamps and expectation state for a new TCP session.
+
+        Drive motors (FL/FR/RL/RR) are marked expected immediately because
+        the F411s stream telemetry continuously while connected.
+        """
+        now = time.monotonic()
+        for m in ("FL", "FR", "RL", "RR"):
+            self._freshness_motor[m] = 0.0
+            self._freshness_motor_stale[m] = False
+            self._motor_link_state[m] = "UNKNOWN"
+            self._telemetry_expected[m] = True
+            self._telemetry_expected_since[m] = now
+        self._reset_sensor_session_state(update_ui=False)
+        self._freshness_arm = 0.0
+        self._freshness_arm_stale = False
+        self._telemetry_expected["ARM"] = self._arm_poll_motors_timer.isActive()
+        self._telemetry_expected_since["ARM"] = now if self._telemetry_expected["ARM"] else 0.0
+        self._freshness_drill = 0.0
+        self._freshness_drill_stale = False
+        self._telemetry_expected["DRILL"] = self._drill_poll_motors_timer.isActive()
+        self._telemetry_expected_since["DRILL"] = now if self._telemetry_expected["DRILL"] else 0.0
+
+    def _mark_all_freshness_disconnected(self):
+        """Mark all subsystems as disconnected (called on TCP disconnect)."""
+        for m in ("FL", "FR", "RL", "RR"):
+            self._freshness_motor_stale[m] = False
+            self._motor_link_state[m] = "UNKNOWN"
+            self._telemetry_expected[m] = None
+            self._telemetry_expected_since[m] = 0.0
+        self._reset_sensor_session_state(update_ui=False)
+        self._freshness_arm_stale = False
+        self._telemetry_expected["ARM"] = False
+        self._telemetry_expected_since["ARM"] = 0.0
+        self._freshness_drill_stale = False
+        self._telemetry_expected["DRILL"] = False
+        self._telemetry_expected_since["DRILL"] = 0.0
+        # Reset group box titles to remove stale suffix
+        self._update_freshness_ui()
+
+    def _touch_motor_freshness(self, motor: str):
+        """Mark motor telemetry as fresh (called on valid telemetry parse).
+
+        Drive-motor telemetry is expected whenever TCP is connected (the F411s
+        stream continuously).  On first touch after a reconnect the expectation
+        transitions from UNKNOWN to FRESH.
+        """
+        if motor in self._freshness_motor:
+            self._freshness_motor[motor] = time.monotonic()
+            if self._telemetry_expected.get(motor) is None:
+                self._telemetry_expected[motor] = True
+                self._telemetry_expected_since[motor] = time.monotonic()
+
+    def _touch_imu_freshness(self, record_kind: str = "MPU_IMU"):
+        now = time.monotonic()
+        self._freshness_imu = now
+        if self._imu_one_shot_session_id == self._tcp_session_id:
+            # Satisfy the one-shot on its first valid record, preserving the
+            # TCP-9.1 behavior.  A short session-bound guard also excludes
+            # mpuconv's immediately following MPU_IMU companion record.
+            self._imu_one_shot_session_id = None
+            self._imu_one_shot_deadline = 0.0
+            self._imu_stream_detect_suppress_session_id = self._tcp_session_id
+            self._imu_stream_detect_suppress_until = (
+                now + IMU_ONE_SHOT_AUTODETECT_GUARD_MS / 1000.0)
+            return
+        if self._imu_stream_state == self.IMU_STREAM_STARTING:
+            self._clear_imu_stream_detection()
+            self._set_imu_stream_state(self.IMU_STREAM_ON)
+        elif record_kind == "MPU_IMU":
+            self._observe_imu_stream_candidate(now)
+
+    def _touch_mag_freshness(self):
+        self._freshness_mag = time.monotonic()
+        if self._mag_one_shot_session_id == self._tcp_session_id:
+            self._mag_one_shot_session_id = None
+            self._mag_one_shot_deadline = 0.0
+
+    def _touch_arm_freshness(self):
+        self._freshness_arm = time.monotonic()
+
+    def _touch_drill_freshness(self):
+        self._freshness_drill = time.monotonic()
+
+    def _check_telemetry_freshness(self):
+        """Periodic timer callback — check each subsystem for staleness.
+
+        Drive motors: expected whenever TCP is connected (F411s stream continuously).
+        IMU / MAG: expected only while the confirmed/requested shared stream is active.
+        ARM / DRILL: expected only while polling is active.
+        """
+        now = time.monotonic()
+        connected = self._tcp_is_connected()
+        self._expire_sensor_one_shots(now)
+        self._expire_imu_stream_detection(now)
+
+        # Per-motor freshness — drive motors expected when connected
+        for m in ("FL", "FR", "RL", "RR"):
+            expected = self._telemetry_expected[m]
+            ts = self._freshness_motor[m]
+            was_stale = self._freshness_motor_stale[m]
+
+            if not connected:
+                self._freshness_motor_stale[m] = False
+            elif expected is False:
+                # Intentionally idle
+                self._freshness_motor_stale[m] = False
+            elif expected is None:
+                # Never received yet — UNKNOWN, not stale
+                self._freshness_motor_stale[m] = False
+            else:
+                # expected is True — determine age from last telemetry or
+                # from expectation-start time if no telemetry has arrived yet.
+                if ts > 0.0:
+                    reference = ts
+                else:
+                    reference = self._telemetry_expected_since.get(m, 0.0)
+                if reference <= 0.0:
+                    # No reference available yet — UNKNOWN
+                    self._freshness_motor_stale[m] = False
+                elif (now - reference) * 1000 > MOTOR_TELEMETRY_STALE_MS:
+                    self._freshness_motor_stale[m] = True
+                    if not was_stale:
+                        self._log_warn(f"{m} telemetry stale")
+                else:
+                    self._freshness_motor_stale[m] = False
+                    if was_stale:
+                        self._log_info(f"{m} telemetry recovered")
+
+        # Optional subsystems (IMU, MAG, ARM, DRILL)
+        for key, ts_attr, stale_attr, threshold, name in [
+            ("IMU",   "_freshness_imu",   "_freshness_imu_stale",   IMU_TELEMETRY_STALE_MS,   "IMU"),
+            ("MAG",   "_freshness_mag",   "_freshness_mag_stale",   MAG_TELEMETRY_STALE_MS,   "MAG"),
+            ("ARM",   "_freshness_arm",   "_freshness_arm_stale",   ARM_TELEMETRY_STALE_MS,   "Arm"),
+            ("DRILL", "_freshness_drill", "_freshness_drill_stale", DRILL_TELEMETRY_STALE_MS, "Drill"),
+        ]:
+            self._check_single_freshness(
+                getattr(self, ts_attr), getattr(self, stale_attr),
+                threshold, name, connected, stale_attr,
+                self._telemetry_expected[key],
+                self._telemetry_expected_since.get(key, 0.0),
+            )
+
+        self._update_freshness_ui()
+
+    def _check_single_freshness(self, ts: float, was_stale: bool,
+                                 threshold_ms: int, name: str,
+                                 connected: bool, attr: str,
+                                 expected: bool | None,
+                                 expected_since: float = 0.0):
+        """Check one subsystem's freshness and update its stale state."""
+        if not connected:
+            setattr(self, attr, False)
+            return
+        if expected is False:
+            # Intentionally idle — not stale
+            setattr(self, attr, False)
+            return
+        if expected is None:
+            # Never received or unknown expectation — not stale, just unknown
+            setattr(self, attr, False)
+            return
+        # expected is True — determine age from last telemetry or
+        # from expectation-start time if no telemetry has arrived yet.
+        if ts > 0.0:
+            reference = ts
+        else:
+            reference = expected_since
+        if reference <= 0.0:
+            setattr(self, attr, False)
+            return
+        now = time.monotonic()
+        if (now - reference) * 1000 > threshold_ms:
+            setattr(self, attr, True)
+            if not was_stale:
+                self._log_warn(f"{name} telemetry stale")
+        else:
+            setattr(self, attr, False)
+            if was_stale:
+                self._log_info(f"{name} telemetry recovered")
+
+    def _sensor_freshness_label(self, key: str) -> str:
+        """Return the independently computed IMU or MAG UI state."""
+        if not self._tcp_is_connected():
+            return "DISCONNECTED"
+        expected = self._telemetry_expected.get(key)
+        if expected is False:
+            return "IDLE"
+        if expected is None:
+            return "UNKNOWN"
+        stale = (self._freshness_imu_stale if key == "IMU"
+                 else self._freshness_mag_stale)
+        if stale:
+            return "STALE"
+        timestamp = self._freshness_imu if key == "IMU" else self._freshness_mag
+        if timestamp <= 0.0:
+            return ("STARTING" if self._imu_stream_state == self.IMU_STREAM_STARTING
+                    else "UNKNOWN")
+        return "FRESH"
+
+    def _update_freshness_ui(self):
+        """Update UI to reflect current freshness state.
+
+        Motor Link column renders a combined status:
+          - STALE | LOST  (freshness stale AND real link lost)
+          - STALE         (freshness stale, link OK or unknown)
+          - LOST          (real link lost, freshness OK)
+          - UNKNOWN       (connected but never received)
+          - OK            (fresh, link OK)
+        """
+        c = self._colors()
+        connected = self._tcp_is_connected()
+
+        # Motor table — update Link column
+        for m in ("FL", "FR", "RL", "RR"):
+            row = self.MOTOR_ROW.get(m)
+            if row is None:
+                continue
+            col = self.MOTOR_COL["link"]
+            item = self._motor_table.item(row, col)
+            if item is None:
+                continue
+
+            stale = self._freshness_motor_stale[m]
+            link = self._motor_link_state.get(m, "UNKNOWN")
+
+            if not connected:
+                item.setText("—")
+                item.setForeground(QColor(c["text_muted"]))
+            elif stale and link == "LOST":
+                item.setText("STALE | LOST")
+                item.setForeground(QColor(c["danger"]))
+            elif stale:
+                item.setText("STALE")
+                item.setForeground(QColor(c["warning"]))
+            elif link == "LOST":
+                item.setText("LOST")
+                item.setForeground(QColor(c["danger"]))
+            elif self._freshness_motor[m] == 0.0:
+                item.setText("UNKNOWN")
+                item.setForeground(QColor(c["text_muted"]))
+            else:
+                item.setText("OK")
+                item.setForeground(QColor(c["success_bright"]))
+
+        # IMU/MAG group box — the stream control is shared, but freshness is
+        # shown independently because either sensor can stop reporting alone.
+        if hasattr(self, "_imu_grp"):
+            if connected:
+                title = (
+                    f"IMU / MAG — IMU: {self._sensor_freshness_label('IMU')} | "
+                    f"MAG: {self._sensor_freshness_label('MAG')}"
+                )
+            else:
+                title = "IMU / MAG — DISCONNECTED"
+            self._imu_grp.setTitle(title)
+
+        # Arm group box
+        if hasattr(self, "_arm_grp"):
+            title = "Manipulation Arm Telemetry"
+            if connected:
+                exp = self._telemetry_expected.get("ARM")
+                if exp is False:
+                    title = "Manipulation Arm Telemetry (IDLE)"
+                elif self._freshness_arm_stale:
+                    title = "Manipulation Arm Telemetry (STALE)"
+                elif self._freshness_arm == 0.0 and exp:
+                    title = "Manipulation Arm Telemetry (UNKNOWN)"
+            self._arm_grp.setTitle(title)
+
+        # Drill group box
+        if hasattr(self, "_drill_grp"):
+            title = "Drill Telemetry"
+            if connected:
+                exp = self._telemetry_expected.get("DRILL")
+                if exp is False:
+                    title = "Drill Telemetry (IDLE)"
+                elif self._freshness_drill_stale:
+                    title = "Drill Telemetry (STALE)"
+                elif self._freshness_drill == 0.0 and exp:
+                    title = "Drill Telemetry (UNKNOWN)"
+            self._drill_grp.setTitle(title)
+
     # -- F411 Motor telemetry parsing --------------------------------------
 
     def _parse_motor_telemetry_line(self, line: str) -> bool:
         """Detect and parse F411 telemetry from [TEL][MOTOR] or legacy [UART_RX].
 
-        Returns True if the line was recognized as telemetry.
+        Require the same core fields used by the H7 telemetry classifier and
+        reject malformed numeric values before touching freshness or UI state.
+        Returns True only for a valid telemetry record.
         """
         motor = None
         payload = None
@@ -2968,6 +5774,18 @@ class EarendilControlGui(QMainWindow):
 
         tel = self._parse_telemetry_payload(payload)
         if not tel:
+            return False
+        required = ("RPM", "PWM_ACT", "RXB")
+        if any(key not in tel for key in required):
+            return False
+        numeric_keys = {
+            "RPM", "T", "D", "APP_PH", "SP", "BRAKE", "FC", "H",
+            "PWM_SET", "PWM_ACT", "QDROP", "RXB",
+        }
+        if any(
+            key in tel and re.fullmatch(r"-?\d+", tel[key]) is None
+            for key in numeric_keys
+        ):
             return False
 
         self._update_motor_telemetry(motor, tel)
@@ -2990,6 +5808,7 @@ class EarendilControlGui(QMainWindow):
         if row is None:
             return
 
+        self._touch_motor_freshness(motor)
         c = self._colors()
         col = self.MOTOR_COL
         tbl = self._motor_table
@@ -3053,7 +5872,10 @@ class EarendilControlGui(QMainWindow):
         # Re-render Error column (UART error has priority over FC)
         self._render_motor_error(motor)
 
-        # Link -> OK when telemetry received
+        # Link -> OK when telemetry received (valid telemetry proves
+        # the H7 is currently receiving data from this motor controller).
+        # This also handles implicit recovery: LOST -> OK on valid telemetry.
+        self._motor_link_state[motor] = "OK"
         link_item = tbl.item(row, col["link"])
         if link_item is not None:
             link_item.setText("OK")
@@ -3143,18 +5965,32 @@ class EarendilControlGui(QMainWindow):
     # -- IMU telemetry parsing -----------------------------------------------
 
     def _parse_imu_line(self, line: str) -> bool:
-        """Detect and parse MPU_IMU / MPU_CONV_MILLI / MAG_IMU telemetry into the IMU table.
+        """Detect and parse MPU/MAG one-shot and periodic telemetry records.
 
         Supports compact (MPU_IMU), detailed (MPU_CONV_MILLI), and magnetometer (MAG_IMU) formats.
         Unknown extra fields are ignored.  Missing fields keep last value.
         Returns True when the line contained recognized IMU telemetry.
         """
+        # Raw one-shot records do not have converted display units, but they
+        # still satisfy their bounded response window when the read succeeded.
+        raw_mpu_fields = _parse_kv_payload(line, "MPU_RAW,")
+        if raw_mpu_fields is not None:
+            if raw_mpu_fields.get("OK") == 1:
+                self._touch_imu_freshness("MPU_RAW")
+            return True
+
+        raw_mag_fields = _parse_kv_payload(line, "MAG_RAW,")
+        if raw_mag_fields is not None:
+            if raw_mag_fields.get("OK") == 1:
+                self._touch_mag_freshness()
+            return True
+
         # Try MPU_IMU first
         fields = _parse_kv_payload(line, "MPU_IMU,")
-        is_mpu = True
+        record_kind = "MPU_IMU"
         if fields is None:
             fields = _parse_kv_payload(line, "MPU_CONV_MILLI,")
-            is_mpu = True
+            record_kind = "MPU_CONV_MILLI"
             if fields is not None:
                 mapped: dict[str, int] = {}
                 key_map = {
@@ -3178,6 +6014,7 @@ class EarendilControlGui(QMainWindow):
             ok = mag_fields.get("OK", 0)
 
             if ok == 1:
+                # Magnetometer: prefer physical units (UTX100) over raw
                 if "MX_UTX100" in mag_fields:
                     self._set_imu_cell(R["Mag"], 1, f"{mag_fields['MX_UTX100'] / 100.0:.2f} µT")
                 elif "MX" in mag_fields:
@@ -3195,7 +6032,10 @@ class EarendilControlGui(QMainWindow):
 
                 if "BMAG_UTX100" in mag_fields:
                     self._set_imu_cell(R["Mag"], 0, f"Mag ({mag_fields['BMAG_UTX100'] / 100.0:.2f} µT)")
+
+                self._touch_mag_freshness()
             else:
+                # OK:0 — show state and health, don't show stale values as fresh
                 age_ms = mag_fields.get("AGE_MS", 0)
                 init = mag_fields.get("INIT", 0)
                 found = mag_fields.get("FOUND", 0)
@@ -3230,6 +6070,8 @@ class EarendilControlGui(QMainWindow):
 
         if fields is None:
             return False
+        if fields.get("OK") != 1:
+            return True
 
         R = self._IMU_ROW
 
@@ -3253,6 +6095,7 @@ class EarendilControlGui(QMainWindow):
         if "TC" in fields:
             self._set_imu_cell(R["Temp"], 1, f"{fields['TC'] / 100.0:.1f} °C")
 
+        self._touch_imu_freshness(record_kind)
         return True
 
     # ======================================================================
@@ -3427,6 +6270,13 @@ class EarendilControlGui(QMainWindow):
         Sends ``cfgread <MOTOR>`` immediately, then polls ``cfgcache <MOTOR>``
         after a short delay.  Retries up to 4 times (total ~2 s).
         """
+        if not self._tcp_is_connected():
+            self._log_warn(
+                f"[CFGREAD] Not started (not connected): {motor}")
+            if dialog is not None:
+                dialog._set_read_status(
+                    motor, "Not connected", success=False)
+            return
         if self._cfgread_motor is not None:
             self._log_warn(f"[CFGREAD] Read already in progress for {self._cfgread_motor}")
             return
@@ -3441,7 +6291,8 @@ class EarendilControlGui(QMainWindow):
         self._log_info(f"[CFGREAD] Sent cfgread {motor}")
 
         # After 500 ms, request cfgcache
-        QTimer.singleShot(500, self._cfgread_first_fetch)
+        sid = self._tcp_session_id
+        QTimer.singleShot(500, lambda sid=sid: self._cfgread_first_fetch_for_session(sid))
 
         # Start timeout
         self._cfgread_timeout_timer.start()
@@ -3455,6 +6306,12 @@ class EarendilControlGui(QMainWindow):
         # Start retry timer if not yet complete
         if self._cfgread_motor is not None:
             self._cfgread_retry_timer.start()
+
+    def _cfgread_first_fetch_for_session(self, session_id: int):
+        """Session-guarded first cfgcache fetch — dropped if session changed."""
+        if not self._is_current_tcp_session(session_id):
+            return
+        self._cfgread_first_fetch()
 
     def _cfgread_retry_fetch(self):
         """Retry cfgcache if not yet complete."""
@@ -3487,17 +6344,94 @@ class EarendilControlGui(QMainWindow):
         self._cfgread_timeout_timer.stop()
         self._cfgread_apply_timer.stop()
 
-    def _send_cmd(self, cmd: str):
-        """Send a raw command string to the H7."""
-        if not self.connected or not self.ser or not self.ser.is_open:
-            self._log_warn("Cannot send to H7: serial port is not connected.")
+    def _on_cmd_send(self):
+        """Send the text from the H7 command input field to the H7."""
+        cmd = self._cmd_input.text().strip()
+        if not cmd:
             return
-        self._arm_track_command(cmd)
-        try:
-            self.ser.write((cmd + "\r\n").encode("utf-8"))
-            self._log_tx(cmd)
-        except Exception as e:
-            self._log_err(f"Send failed: {e}")
+        if not self._tcp_is_connected():
+            self._log_warn("Cannot send to H7: not connected.")
+            return
+        self._send_cmd(cmd)
+        self._cmd_input.clear()
+
+    def _send_cmd(self, cmd: str, *, quiet: bool = False, track_arm: bool = True) -> bool:
+        """Send a raw command string to the H7 via TCP.
+
+        quiet=True suppresses console logging (used for heartbeat).
+        track_arm=False skips arm-command tracking (used for heartbeat).
+        """
+        if not self._tcp_is_connected():
+            return False
+
+        normalized = cmd.rstrip("\r\n")
+        if not normalized:
+            return False
+
+        payload = (normalized + "\r\n").encode("utf-8")
+
+        # TX backlog guard — prevent indefinite accumulation on slow Wi-Fi.
+        # Check the projected queue size (current pending + new payload).
+        pending = int(self._tcp_socket.bytesToWrite())
+        projected = pending + len(payload)
+        if projected > MAX_TCP_TX_BACKLOG:
+            detail = (
+                f"TCP TX backlog {pending} + {len(payload)} = {projected} "
+                f"bytes exceeds limit {MAX_TCP_TX_BACKLOG} — aborting."
+            )
+            session_id = self._begin_tcp_teardown(
+                self.TCP_TX_OVERFLOW, detail)
+            reason = self._tcp_teardown_reason or self.TCP_TX_OVERFLOW
+            self._prepare_for_disconnect()
+            self._tcp_socket.abort()
+            self._finalize_tcp_disconnected(
+                reason, session_id)
+            return False
+
+        written = self._tcp_socket.write(payload)
+        if written < 0:
+            if not quiet:
+                self._log_err(
+                    f"TCP write failed: {self._tcp_socket.errorString()}"
+                )
+            return False
+
+        if written != len(payload):
+            if not quiet:
+                self._log_warn(
+                    f"TCP partial queue write: {written}/{len(payload)} bytes"
+                )
+            return False
+
+        if track_arm:
+            self._arm_track_command(normalized)
+        return True
+
+    def _send_manipulation_cmd(
+            self, payload: str, *, quiet: bool = False,
+            track_arm: bool = True) -> bool:
+        """Send one F401 payload through H7's required ``arm`` route.
+
+        Tracking receives the unprefixed F401 payload, while the TCP wire
+        receives exactly one ``arm `` prefix.  `_send_cmd()` remains the sole
+        owner of connection checks, backlog protection, CRLF framing and TCP
+        writes.
+        """
+        normalized = _normalize_manipulation_payload(payload)
+        if normalized is None:
+            return False
+        wire_command = _format_manipulation_command(normalized)
+        if wire_command is None:
+            return False
+        sent = self._send_cmd(
+            wire_command, quiet=quiet, track_arm=False)
+        if sent and track_arm:
+            self._arm_track_command(normalized)
+        return sent
+
+    def _send_heartbeat(self):
+        """Send a heartbeat keepalive to the H7 (quiet, no arm tracking)."""
+        self._send_cmd("hb", quiet=True, track_arm=False)
 
     def _arm_track_command(self, cmd: str):
         """Track arm joint commands for target angle updates."""
@@ -3535,19 +6469,6 @@ class EarendilControlGui(QMainWindow):
                     self._arm_track_stop(joint)
             else:
                 self._arm_track_stop(None)
-
-    def _send_h7_input(self):
-        """Send the text from the H7 input field to the serial port."""
-        text = self._h7_input.text().strip()
-        if not text:
-            return
-        self._h7_input.clear()
-        if not self.connected:
-            self._log_h7("[TX-H7]", f"{text}  (not sent - not connected)", self._colors()['warning'])
-            self._log_warn("Cannot send to H7: serial port is not connected.")
-        else:
-            self._send_cmd(text)
-        self.setFocus()  # return focus to main window so WASD works again
 
     # ======================================================================
     #  Mode / Value Management
@@ -3674,15 +6595,6 @@ class EarendilControlGui(QMainWindow):
     # ======================================================================
     #  Keyboard Handling
     # ======================================================================
-
-    def eventFilter(self, obj, event):
-        """Event filter only for H7 input field."""
-        if obj is self._h7_input:
-            if event.type() == QEvent.KeyPress and event.key() == Qt.Key_Escape:
-                self.setFocus()
-                return True
-            return False  # let QLineEdit handle its own events
-        return super().eventFilter(obj, event)
 
     MOVEMENT_KEYS = ("W", "S", "A", "D", "T", "Y", "G", "H")
 
@@ -3986,8 +6898,6 @@ class EarendilControlGui(QMainWindow):
 
         console_html = (
             f"<table style='font-size:13px; color:{c['text']};' cellspacing='4'>"
-            f"<tr><td style='color:{c['accent_gold']};'><b>H7 Console:</b></td>"
-            f"<td>Shows serial TX/RX with the STM32H723</td></tr>"
             f"<tr><td style='color:{c['text_muted']};'><b>GUI Console:</b></td>"
             f"<td>Shows GUI-local messages, warnings, and errors</td></tr>"
             f"</table>"
@@ -4136,15 +7046,15 @@ class EarendilControlGui(QMainWindow):
         """Send one validated H7 motor tuning command line and log it.
 
         `command` must be the full line (e.g. "FL pi 0.8 0.05") and is
-        forwarded through _send_cmd() - the same serial path used by all
-        other H7 terminal commands.  If serial is not connected, the
-        command is still logged with a warning so the operator can see
-        what would have been sent.
+        forwarded through _send_cmd() - the same TCP path used by all
+        other H7 terminal commands.  If not connected, the command is still
+        logged with a warning so the operator can see what would have been
+        sent.
         with a warning so the operator can see what would have been sent.
         """
-        if not self.connected or not self.ser or not self.ser.is_open:
+        if not self._tcp_is_connected():
             self._log_warn(
-                f"[F411-TUNE] Not sent (serial disconnected): {command}"
+                f"[F411-TUNE] Not sent (not connected): {command}"
             )
             return
         self._log_info(f"[F411-TUNE] {command}")
@@ -4271,7 +7181,84 @@ class EarendilControlGui(QMainWindow):
 
         # Create a new dialog instance
         self._imu_settings_dialog = ImuMagSettingsDialog(self, self)
+        self._imu_settings_dialog.update_stream_status(
+            self._imu_stream_state)
         self._imu_settings_dialog.show()
+
+    # -- Manipulation Arm Settings dialog (non-modal) ---------------------
+
+    def _open_arm_settings(self):
+        """Open the Manipulation Arm Settings dialog (non-modal).
+
+        Reuses an existing instance if still open.  Newly created dialogs
+        are pre-populated from the most recently parsed ``params`` cache so
+        the operator does not see blank fields after a refresh.
+        """
+        if self._arm_settings_dialog is not None and self._arm_settings_dialog.isVisible():
+            self._arm_settings_dialog.raise_()
+            self._arm_settings_dialog.activateWindow()
+            return
+        self._arm_settings_dialog = ManipulationArmSettingsDialog(self, self)
+        # Re-apply the latest cached F401 params so the dialog sees live
+        # values even if it was opened after a params refresh.
+        if self._arm_params_cache:
+            self._arm_settings_dialog.apply_params(self._arm_params_cache)
+        self._arm_settings_dialog.show()
+
+    def send_arm_setting_command(self, command: str):
+        """Send one manipulation arm F401 setting command through H7 UART8.
+
+        If not connected, _send_cmd() logs a warning and
+        no exception is raised.  The command is also logged under the GUI
+        console so the operator can see what would have been sent.
+        """
+        if not self._tcp_is_connected():
+            self._log_warn(
+                f"[ARM-SET] Not sent (not connected): {command}")
+            return
+        self._log_info(f"[ARM-SET] {command}")
+        self._send_manipulation_cmd(command)
+
+    def send_arm_setting_sequence(self, commands: list[str], interval_ms: int = 100):
+        """Send a paced sequence through the centralized manipulation route.
+
+        Commands are spaced by ``interval_ms`` (default 100) via QTimer so the
+        H7 terminal / F4011 UART RX FIFO can absorb them.  If the serial
+        port disconnects mid-sequence, remaining commands are logged as
+        warnings instead of being sent.
+        """
+        if not commands:
+            return
+        if not self._tcp_is_connected():
+            for cmd in commands:
+                self._log_warn(
+                    f"[ARM-SET] Not sent (not connected): {cmd}")
+            return
+        self._log_info(f"[ARM-SET] Sending {len(commands)} command(s)")
+        # Send the first command immediately so single-row Sends feel snappy;
+        # subsequent commands are paced by a one-shot QTimer chain.
+        first = commands[0]
+        self._log_info(f"[ARM-SET] {first}")
+        self._send_manipulation_cmd(first)
+        rest = commands[1:]
+        if not rest:
+            return
+
+        sid = self._tcp_session_id
+
+        def _send_next(idx: int):
+            if idx >= len(rest):
+                return
+            if not self._is_current_tcp_session(sid):
+                self._log_warn(
+                    f"[ARM-SET] Sequence aborted (session changed)")
+                return
+            cmd = rest[idx]
+            self._log_info(f"[ARM-SET] {cmd}")
+            self._send_manipulation_cmd(cmd)
+            QTimer.singleShot(interval_ms, lambda: _send_next(idx + 1))
+
+        QTimer.singleShot(interval_ms, lambda: _send_next(0))
 
     # -- F411 tuning paced-send (QTimer-based, no blocking) --------------
 
@@ -4311,12 +7298,12 @@ class EarendilControlGui(QMainWindow):
             return
 
         cmd = self._tuning_send_queue.popleft()
-        if not self.connected or not self.ser or not self.ser.is_open:
-            self._log_warn(f"[F411-TUNE] Not sent (serial disconnected): {cmd}")
+        if not self._tcp_is_connected():
+            self._log_warn(f"[F411-TUNE] Not sent (not connected): {cmd}")
             # Drain remaining queue so buttons get re-enabled.
             self._tuning_send_queue.clear()
             self._tuning_send_timer.stop()
-            self._log_warn("[F411-TUNE] Sequence aborted (serial disconnected)")
+            self._log_warn("[F411-TUNE] Sequence aborted (not connected)")
             dlg = self._tuning_dialog_ref
             self._tuning_dialog_ref = None
             if dlg is not None:
@@ -4331,13 +7318,39 @@ class EarendilControlGui(QMainWindow):
     # ======================================================================
 
     def closeEvent(self, event):
-        self._tuning_send_timer.stop()
-        self._tuning_send_queue.clear()
-        self._repeat_timer.stop()
-        self._arc_repeat_timer.stop()
-        self._arm_stop_polling()
-        self._stop_reader()
-        self._close_serial()
+        self._window_closing = True
+        state = self._tcp_socket.state()
+
+        if state == QAbstractSocket.ConnectedState:
+            session_id = self._begin_tcp_teardown(self.TCP_WINDOW_CLOSE)
+            self._prepare_for_disconnect(stop_link_timers=False)
+            self._send_cmd("stop")
+            self._stop_link_timers()
+            if self._tcp_socket.state() == QAbstractSocket.ConnectedState:
+                self._tcp_socket.flush()
+                self._tcp_socket.disconnectFromHost()
+            self._finalize_tcp_disconnected(
+                self.TCP_WINDOW_CLOSE, session_id)
+        elif state in (QAbstractSocket.HostLookupState,
+                       QAbstractSocket.ConnectingState):
+            session_id = self._begin_tcp_teardown(self.TCP_WINDOW_CLOSE)
+            self._prepare_for_disconnect()
+            self._tcp_socket.abort()
+            self._finalize_tcp_disconnected(
+                self.TCP_WINDOW_CLOSE, session_id)
+        elif state == QAbstractSocket.ClosingState:
+            if self._tcp_teardown_reason is None:
+                session_id = self._begin_tcp_teardown(self.TCP_WINDOW_CLOSE)
+            else:
+                session_id = self._tcp_teardown_session_id
+            self._finalize_tcp_disconnected(
+                self._tcp_teardown_reason or self.TCP_WINDOW_CLOSE,
+                session_id)
+        else:
+            self._tcp_teardown_reason = self.TCP_WINDOW_CLOSE
+
+        self._tcp_connect_timer.stop()
+        self._tcp_rx_buffer.clear()
         super().closeEvent(event)
 
 

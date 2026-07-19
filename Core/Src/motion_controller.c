@@ -114,7 +114,7 @@ void MotionController_DisarmSafe(void)
 void MotionController_ExecuteArcTurn(bool isDuty, uint16_t target,
                                      DriveArcMotion_t motion,
                                      uint16_t trPermille,
-                                     uint16_t *outInner,
+                                     int32_t *outInner,
                                      uint16_t *outOuter)
 {
     /* Control mode gate */
@@ -132,58 +132,115 @@ void MotionController_ExecuteArcTurn(bool isDuty, uint16_t target,
         return;
     }
 
-    /* Compute inner/outer speeds */
-    uint16_t inner = (uint16_t)((uint32_t)target * (1000 - trPermille) / 1000);
+    /* When target is zero, STOP all motors (coast), not BRAKE. */
+    if (target == 0)
+    {
+        SetAllMotors(MCMD_STOP, 0);
+        ApplyMotorPolarity(motorCmds);
+        Logger_Log(LOG_INFO, "[DRIVE] target=0 -> STOP all motors");
+        MotorDispatcher_SendAll(motorCmds);
+        if (outInner) *outInner = 0;
+        if (outOuter) *outOuter = 0;
+        return;
+    }
+
+    /* ── Signed blended arc/tank-turn model ──────────────────────────
+     *
+     *   signedInner = target * (1000 - 2 * trPermille) / 1000
+     *
+     *   tr=0.00 → signedInner = +target  (straight)
+     *   tr=0.25 → signedInner = +target/2 (arc, same direction)
+     *   tr=0.50 → signedInner =  0        (inner BRAKE)
+     *   tr=0.75 → signedInner = -target/2 (arc, opposite direction)
+     *   tr=1.00 → signedInner = -target   (full tank turn)
+     *
+     * BRAKE is only issued at the exact brake point (trPermille == 500).
+     * Anti-rounding prevents integer truncation from accidentally producing
+     * zero near the brake point. */
+    int32_t signedInner = (int32_t)target * (1000 - 2 * (int32_t)trPermille) / 1000;
     uint16_t outer = target;
 
-    if (outInner) *outInner = inner;
+    /* Anti-rounding: clamp to at least ±1 when not at the exact brake point. */
+    if (trPermille < 500 && signedInner == 0)
+        signedInner = 1;
+    else if (trPermille > 500 && signedInner == 0)
+        signedInner = -1;
+
+    if (outInner) *outInner = signedInner;
     if (outOuter) *outOuter = outer;
 
-    /* Map arc motion to per-motor logical commands (before polarity correction).
-     * Forward arcs:  left-side = inner, right-side = outer, both MCMD_FORWARD.
-     * Backward arcs: left-side = inner, right-side = outer, both MCMD_BACKWARD.
+    /* ── Map to per-motor logical commands (before polarity correction).
      *
-     * Inner motors at speed 0 (turn ratio 1.0) are actively braked ("x")
-     * instead of coasting, so they resist rotation during the turn.
+     * Outer side: always moves in the requested direction (outerDir).
+     * Inner side:
+     *   signedInner > 0 → same direction as outer
+     *   signedInner == 0 → BRAKE (only at trPermille == 500)
+     *   signedInner < 0 → opposite direction to outer
      *
      * After ApplyMotorPolarity(), FR/RR (physically reversed) get their
      * direction flipped, producing the correct physical motion. */
-    MotorDir_t dir;
-    uint16_t   leftSpd, rightSpd;
+    MotorDir_t outerDir;
+    bool       leftIsInner;
 
     switch (motion)
     {
-        case DRIVE_ARC_FL:
-            dir     = MCMD_FORWARD;
-            leftSpd = inner;
-            rightSpd = outer;
-            break;
-        case DRIVE_ARC_FR:
-            dir     = MCMD_FORWARD;
-            leftSpd = outer;
-            rightSpd = inner;
-            break;
-        case DRIVE_ARC_BL:
-            dir     = MCMD_BACKWARD;
-            leftSpd = inner;
-            rightSpd = outer;
-            break;
-        case DRIVE_ARC_BR:
-            dir     = MCMD_BACKWARD;
-            leftSpd = outer;
-            rightSpd = inner;
-            break;
-        default:
-            return;
+        case DRIVE_ARC_FL: outerDir = MCMD_FORWARD;  leftIsInner = true;  break;
+        case DRIVE_ARC_FR: outerDir = MCMD_FORWARD;  leftIsInner = false; break;
+        case DRIVE_ARC_BL: outerDir = MCMD_BACKWARD; leftIsInner = true;  break;
+        case DRIVE_ARC_BR: outerDir = MCMD_BACKWARD; leftIsInner = false; break;
+        default: return;
     }
 
-    SetMotorCmd(MOTOR_FL, leftSpd  == 0 ? MCMD_BRAKE : dir, leftSpd);
-    SetMotorCmd(MOTOR_RL, leftSpd  == 0 ? MCMD_BRAKE : dir, leftSpd);
-    SetMotorCmd(MOTOR_FR, rightSpd == 0 ? MCMD_BRAKE : dir, rightSpd);
-    SetMotorCmd(MOTOR_RR, rightSpd == 0 ? MCMD_BRAKE : dir, rightSpd);
+    /* Determine inner-side direction and magnitude. */
+    MotorDir_t innerDir;
+    uint16_t   innerMag;
+
+    if (trPermille == 500)
+    {
+        /* Exact brake point: active brake on inner side. */
+        innerDir = MCMD_BRAKE;
+        innerMag = 0;
+    }
+    else if (signedInner > 0)
+    {
+        /* Same direction as outer. */
+        innerDir = outerDir;
+        innerMag = (uint16_t)signedInner;
+    }
+    else
+    {
+        /* Opposite direction to outer (signedInner < 0). */
+        innerDir = (outerDir == MCMD_FORWARD) ? MCMD_BACKWARD : MCMD_FORWARD;
+        innerMag = (uint16_t)(-signedInner);
+    }
+
+    /* Assign to left/right motor groups. */
+    MotorDir_t leftDir, rightDir;
+    uint16_t   leftSpd, rightSpd;
+
+    if (leftIsInner)
+    {
+        leftDir  = innerDir;
+        leftSpd  = innerMag;
+        rightDir = outerDir;
+        rightSpd = outer;
+    }
+    else
+    {
+        leftDir  = outerDir;
+        leftSpd  = outer;
+        rightDir = innerDir;
+        rightSpd = innerMag;
+    }
+
+    SetMotorCmd(MOTOR_FL, leftDir,  leftSpd);
+    SetMotorCmd(MOTOR_RL, leftDir,  leftSpd);
+    SetMotorCmd(MOTOR_FR, rightDir, rightSpd);
+    SetMotorCmd(MOTOR_RR, rightDir, rightSpd);
 
     ApplyMotorPolarity(motorCmds);
 
+    /* ── Enhanced arc-turn logging ─────────────────────────────────── */
     const char *modeStr = isDuty ? "DUTY" : "RPM";
     const char *motionName;
     switch (motion)
@@ -195,16 +252,21 @@ void MotionController_ExecuteArcTurn(bool isDuty, uint16_t target,
         default:            motionName = "??"; break;
     }
 
+    static const char *dirNames[] = {"STOP", "FWD", "BWD", "BRK"};
+
     Logger_Log(LOG_INFO,
-               "[DRIVE] mode=%s target=%u motion=%s tr=%u.%02u tr_permille=%u inner=%u outer=%u",
+               "[DRIVE] mode=%s target=%u motion=%s tr=%u.%02u tr_permille=%u",
                modeStr, target, motionName,
                trPermille / 1000, (trPermille % 1000) / 10,
-               trPermille, inner, outer);
+               trPermille);
 
-    if (dir == MCMD_BACKWARD)
-        Logger_Log(LOG_INFO, "[DRIVE_LOGICAL] left=-%u right=-%u", leftSpd, rightSpd);
-    else
-        Logger_Log(LOG_INFO, "[DRIVE_LOGICAL] left=+%u right=+%u", leftSpd, rightSpd);
+    Logger_Log(LOG_INFO,
+               "[DRIVE] inner_signed=%ld inner_dir=%s inner_mag=%u outer=%u outer_dir=%s",
+               (long)signedInner, dirNames[innerDir], innerMag,
+               outer, dirNames[outerDir]);
+
+    Logger_Log(LOG_INFO, "[DRIVE_LOGICAL] left=%u(%s) right=%u(%s)",
+               leftSpd, dirNames[leftDir], rightSpd, dirNames[rightDir]);
 
     MotorDispatcher_SendAll(motorCmds);
 }

@@ -5,4 +5,4 @@
 ../Core/Src/terminal_parser.c:97:13:ParseDriveTurnRatioPermille	32	static
 ../Core/Src/terminal_parser.c:163:13:ParseTuneCommand	344	static
 ../Core/Src/terminal_parser.c:423:13:FillMotion	24	static
-../Core/Src/terminal_parser.c:446:6:TerminalParser_Parse	248	static
+../Core/Src/terminal_parser.c:446:6:TerminalParser_Parse	272	static

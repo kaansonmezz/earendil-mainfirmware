@@ -14,6 +14,12 @@
  * This eliminates ~100 unnecessary bus probes per IMU read cycle. */
 static uint8_t mpu_confirmed = 0;
 
+/* Called by I2C bus recovery to force MPU re-probe after shared bus reset. */
+void IMU_MPU9250_InvalidateCache(void)
+{
+    mpu_confirmed = 0;
+}
+
 /* ── Supported WHO_AM_I helper ───────────────────────────────────────────── */
 
 uint8_t IMU_MPU9250_IsSupportedWho(uint8_t who)
@@ -1298,9 +1304,24 @@ int16_t IMU_MPU9250_BiasGetZ(void)
 
 /* ── IMU stream control ───────────────────────────────────────────────────── */
 
-static uint8_t  imu_stream_enabled   = 1;
-static uint32_t imu_stream_period_ms = 20;
-static uint32_t imu_stream_last_tick = 0;
+static uint8_t  imu_stream_enabled       = 1;
+
+/* ── Acquisition scheduling (MPU I2C burst read) ────────────────────────────
+ * The MPU is read at a fixed 50 Hz (20 ms) cadence regardless of the
+ * per-sensor telemetry periods.  Each acquisition performs a single 14-byte
+ * burst read that populates the shared accel/gyro/temperature cache.
+ * Telemetry output is then independently scheduled per sensor. */
+
+#define IMU_ACQUISITION_PERIOD_MS  20U
+static uint32_t imu_acquisition_last_tick          = 0;
+static uint32_t imu_last_successful_sample_tick    = 0;
+
+/* ── Per-sensor telemetry periods ─────────────────────────────────────────── */
+
+static uint32_t imu_gyro_period_ms  = 100;
+static uint32_t imu_gyro_last_tick  = 0;
+static uint32_t imu_accel_period_ms = 100;
+static uint32_t imu_accel_last_tick = 0;
 
 /* ── Gyro output filter (LPF + deadband, display-only) ────────────────────── */
 
@@ -1408,10 +1429,11 @@ void IMU_ApplyGyroFilter(int32_t *gx_mdps, int32_t *gy_mdps, int32_t *gz_mdps)
 
 void IMU_StreamOn(void)
 {
-    imu_stream_enabled   = 1;
-    imu_stream_last_tick = HAL_GetTick();
-    Logger_Log(LOG_INFO, "IMU_STREAM,EN:1,PERIOD_MS:%lu,OK:1",
-               (unsigned long)imu_stream_period_ms);
+    imu_stream_enabled = 1;
+    Logger_Log(LOG_INFO, "IMU_STREAM,EN:1,ACQ_MS:%lu,GYRO_TEL_MS:%lu,ACCEL_TEL_MS:%lu,OK:1",
+               (unsigned long)IMU_ACQUISITION_PERIOD_MS,
+               (unsigned long)imu_gyro_period_ms,
+               (unsigned long)imu_accel_period_ms);
 }
 
 void IMU_StreamOff(void)
@@ -1427,18 +1449,53 @@ void IMU_StreamSetPeriod(uint32_t ms)
         Logger_Log(LOG_INFO, "IMU_TELPER,ERR:RANGE,MIN:20,MAX:5000,OK:0");
         return;
     }
-    imu_stream_period_ms = ms;
-    Logger_Log(LOG_INFO, "IMU_TELPER,PERIOD_MS:%lu,OK:1", (unsigned long)ms);
+    imu_gyro_period_ms  = ms;
+    imu_accel_period_ms = ms;
+    Logger_Log(LOG_INFO, "IMU_TELPER,ACQ_MS:%lu,GYRO:%lu,ACCEL:%lu,OK:1",
+               (unsigned long)IMU_ACQUISITION_PERIOD_MS,
+               (unsigned long)ms, (unsigned long)ms);
 }
 
 uint32_t IMU_StreamGetPeriod(void)
 {
-    return imu_stream_period_ms;
+    return IMU_ACQUISITION_PERIOD_MS;
 }
 
 uint8_t IMU_StreamIsEnabled(void)
 {
     return imu_stream_enabled;
+}
+
+void IMU_GyroSetTelemetryPeriod(uint32_t ms)
+{
+    if (ms < 20U || ms > 5000U)
+    {
+        Logger_Log(LOG_INFO, "GYRO_TELPER,ERR:RANGE,MIN:20,MAX:5000,OK:0");
+        return;
+    }
+    imu_gyro_period_ms = ms;
+    Logger_Log(LOG_INFO, "GYRO_TELPER,PERIOD_MS:%lu,OK:1", (unsigned long)ms);
+}
+
+uint32_t IMU_GyroGetTelemetryPeriod(void)
+{
+    return imu_gyro_period_ms;
+}
+
+void IMU_AccelSetTelemetryPeriod(uint32_t ms)
+{
+    if (ms < 20U || ms > 5000U)
+    {
+        Logger_Log(LOG_INFO, "ACCEL_TELPER,ERR:RANGE,MIN:20,MAX:5000,OK:0");
+        return;
+    }
+    imu_accel_period_ms = ms;
+    Logger_Log(LOG_INFO, "ACCEL_TELPER,PERIOD_MS:%lu,OK:1", (unsigned long)ms);
+}
+
+uint32_t IMU_AccelGetTelemetryPeriod(void)
+{
+    return imu_accel_period_ms;
 }
 
 void IMU_StreamTask(void)
@@ -1447,11 +1504,23 @@ void IMU_StreamTask(void)
         return;
 
     uint32_t now = HAL_GetTick();
-    if ((now - imu_stream_last_tick) < imu_stream_period_ms)
+
+    /* ── Acquisition gate: read MPU at fixed 50 Hz cadence ──────────────
+     * The MPU burst read is decoupled from telemetry scheduling.
+     * At most one 14-byte I2C read per acquisition period. */
+    if ((now - imu_acquisition_last_tick) < IMU_ACQUISITION_PERIOD_MS)
         return;
 
-    imu_stream_last_tick = now;
+    imu_acquisition_last_tick = now;
 
+    /* ── Telemetry scheduling (independent per sensor) ────────────────── */
+    uint8_t need_gyro  = (uint8_t)((now - imu_gyro_last_tick)  >= imu_gyro_period_ms);
+    uint8_t need_accel = (uint8_t)((now - imu_accel_last_tick) >= imu_accel_period_ms);
+
+    /* Nothing to send yet — but still acquire so the cache stays fresh. */
+    /* (No early return: we always do the burst read at acquisition rate.) */
+
+    /* ── Single MPU burst read ────────────────────────────────────────── */
     extern I2C_HandleTypeDef hi2c1;
     IMU_MPU9250_Conv_t conv;
     HAL_StatusTypeDef st = IMU_MPU9250_ReadConverted(&hi2c1, &conv);
@@ -1459,30 +1528,56 @@ void IMU_StreamTask(void)
 
     if (ok)
     {
-        int32_t gx = conv.gyro_x_mdps;
-        int32_t gy = conv.gyro_y_mdps;
-        int32_t gz = conv.gyro_z_mdps;
-        IMU_ApplyGyroOutputFilter(&gx, &gy, &gz);
+        imu_last_successful_sample_tick = now;
 
-        Logger_Log(LOG_INFO,
-                   "MPU_IMU,"
-                   "AX:%ld,AY:%ld,AZ:%ld,"
-                   "GX:%ld,GY:%ld,GZ:%ld,"
-                   "TC:%ld,BIAS:%u,BSRC:%u,GFILT:%u,GDB:%ld,GLPF:%ld,OK:1",
-                   (long)conv.acc_x_mg, (long)conv.acc_y_mg, (long)conv.acc_z_mg,
-                   (long)gx, (long)gy, (long)gz,
-                   (long)conv.temp_cx100,
-                   IMU_MPU9250_BiasIsEnabled(), IMU_MPU9250_BiasGetSource(),
-                   imu_gyro_filter_enabled,
-                   (long)imu_gyro_deadband_mdps, (long)imu_gyro_lpf_alpha_permille);
+        /* Gyro telemetry — independent of accel timing. */
+        if (need_gyro)
+        {
+            int32_t gx = conv.gyro_x_mdps;
+            int32_t gy = conv.gyro_y_mdps;
+            int32_t gz = conv.gyro_z_mdps;
+            IMU_ApplyGyroOutputFilter(&gx, &gy, &gz);
+
+            Logger_Log(LOG_INFO,
+                       "MPU_GYRO,"
+                       "GX:%ld,GY:%ld,GZ:%ld,"
+                       "TC:%ld,BIAS:%u,BSRC:%u,GFILT:%u,GDB:%ld,GLPF:%ld,OK:1",
+                       (long)gx, (long)gy, (long)gz,
+                       (long)conv.temp_cx100,
+                       IMU_MPU9250_BiasIsEnabled(), IMU_MPU9250_BiasGetSource(),
+                       imu_gyro_filter_enabled,
+                       (long)imu_gyro_deadband_mdps, (long)imu_gyro_lpf_alpha_permille);
+            imu_gyro_last_tick = now;
+        }
+
+        /* Accel telemetry — independent of gyro timing. */
+        if (need_accel)
+        {
+            Logger_Log(LOG_INFO,
+                       "MPU_ACCEL,"
+                       "AX:%ld,AY:%ld,AZ:%ld,"
+                       "TC:%ld,OK:1",
+                       (long)conv.acc_x_mg, (long)conv.acc_y_mg, (long)conv.acc_z_mg,
+                       (long)conv.temp_cx100);
+            imu_accel_last_tick = now;
+        }
     }
     else
     {
-        Logger_Log(LOG_INFO, "MPU_IMU,OK:0");
+        /* Error: do NOT update imu_last_successful_sample_tick.
+         * Telemetry timestamps are updated to rate-limit error messages. */
+        if (need_gyro)
+        {
+            Logger_Log(LOG_INFO, "MPU_GYRO,OK:0");
+            imu_gyro_last_tick = now;
+        }
+        if (need_accel)
+        {
+            Logger_Log(LOG_INFO, "MPU_ACCEL,OK:0");
+            imu_accel_last_tick = now;
+        }
     }
 
-    /* Print magnetometer telemetry regardless of MPU status */
-    if (!g_mag_handle.initialized)
-        MAG_QMC5883P_Init(&hi2c1, &g_mag_handle);
-    MAG_QMC5883P_ReadImu(&hi2c1, &g_mag_handle);
+    /* Magnetometer is handled by MAG_QMC5883L_Task() in the main loop.
+     * Telemetry is published separately by MAG_QMC5883L_Telemetry(). */
 }

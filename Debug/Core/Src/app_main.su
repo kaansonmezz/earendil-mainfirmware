@@ -1,2 +1,2 @@
 ../Core/Src/app_main.c:31:6:App_Init	16	static
-../Core/Src/app_main.c:68:6:App_Update	16	static
+../Core/Src/app_main.c:86:6:App_Update	16	static

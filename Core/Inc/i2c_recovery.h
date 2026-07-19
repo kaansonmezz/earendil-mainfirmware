@@ -3,18 +3,32 @@
 
 #include "stm32h7xx_hal.h"
 
-/* I2C bus recovery: unstick a locked bus (slave holding SDA low).
- * Performs 9-clock pulse recovery on SCL, then re-initialises the
- * I2C peripheral via HAL_I2C_DeInit / HAL_I2C_Init.
- * Returns HAL_OK if bus is recovered (SDA reads high after recovery). */
+/* ── I2C bus recovery ──────────────────────────────────────────────────────
+ * Handles three fault classes:
+ *   A. Physical bus stuck: SDA low or SCL low.
+ *   B. Physical lines idle but STM32 I2C peripheral/HAL state stuck.
+ *   C. Magnetometer internal state failure (handled by mag driver).
+ *
+ * Recovery affects both QMC5883L and MPU9250 on shared I2C1. */
+
+/* Combined recovery entry point.  Selects the appropriate recovery
+ * strategy based on line states and HAL error.
+ * Returns HAL_OK on success. */
 HAL_StatusTypeDef I2C_BusRecovery(I2C_HandleTypeDef *hi2c);
 
-/* I2C peripheral hard-reset via RCC force/release reset + HAL re-init.
+/* Full peripheral reset (RCC force/release + HAL re-init).
  * Use when the peripheral is stuck in BUSY state. */
 HAL_StatusTypeDef I2C_BusResetAndReinit(I2C_HandleTypeDef *hi2c);
 
-/* Combined: try to recover a stuck bus.  First attempt 9-clock recovery,
- * if that fails do a full peripheral reset.  Returns HAL_OK on success. */
+/* Alias for I2C_BusRecovery (backward compatibility). */
 HAL_StatusTypeDef I2C_RecoverBus(I2C_HandleTypeDef *hi2c);
+
+/* Returns non-zero if a recovery operation is currently in progress.
+ * Callers should avoid initiating nested recovery. */
+uint8_t I2C_RecoveryInProgress(void);
+
+/* Invalidate MPU9250 address cache after shared-bus recovery.
+ * Defined in imu_mpu9250.c. */
+extern void IMU_MPU9250_InvalidateCache(void);
 
 #endif /* I2C_RECOVERY_H */

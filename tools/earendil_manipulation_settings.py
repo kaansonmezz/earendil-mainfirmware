@@ -4332,27 +4332,57 @@ class EarendilControlGui(QMainWindow):
         mag_fields = _parse_kv_payload(line, "MAG_IMU,")
         if mag_fields is not None:
             R = self._IMU_ROW
+            state = mag_fields.get("STATE", "UNKNOWN")
+            ok = mag_fields.get("OK", 0)
 
-            # Magnetometer: prefer physical units (UTX100) over raw
-            if "MX_UTX100" in mag_fields:
-                self._set_imu_cell(R["Mag"], 1, f"{mag_fields['MX_UTX100'] / 100.0:.2f} µT")
-            elif "MX" in mag_fields:
-                # Fallback: convert raw to µT (3750 LSB/Gauss, 1 Gauss = 100 µT)
-                self._set_imu_cell(R["Mag"], 1, f"{mag_fields['MX'] * 100.0 / 3750.0:.2f} µT")
+            if ok == 1:
+                if "MX_UTX100" in mag_fields:
+                    self._set_imu_cell(R["Mag"], 1, f"{mag_fields['MX_UTX100'] / 100.0:.2f} µT")
+                elif "MX" in mag_fields:
+                    self._set_imu_cell(R["Mag"], 1, f"{mag_fields['MX'] * 100.0 / 3750.0:.2f} µT")
 
-            if "MY_UTX100" in mag_fields:
-                self._set_imu_cell(R["Mag"], 2, f"{mag_fields['MY_UTX100'] / 100.0:.2f} µT")
-            elif "MY" in mag_fields:
-                self._set_imu_cell(R["Mag"], 2, f"{mag_fields['MY'] * 100.0 / 3750.0:.2f} µT")
+                if "MY_UTX100" in mag_fields:
+                    self._set_imu_cell(R["Mag"], 2, f"{mag_fields['MY_UTX100'] / 100.0:.2f} µT")
+                elif "MY" in mag_fields:
+                    self._set_imu_cell(R["Mag"], 2, f"{mag_fields['MY'] * 100.0 / 3750.0:.2f} µT")
 
-            if "MZ_UTX100" in mag_fields:
-                self._set_imu_cell(R["Mag"], 3, f"{mag_fields['MZ_UTX100'] / 100.0:.2f} µT")
-            elif "MZ" in mag_fields:
-                self._set_imu_cell(R["Mag"], 3, f"{mag_fields['MZ'] * 100.0 / 3750.0:.2f} µT")
+                if "MZ_UTX100" in mag_fields:
+                    self._set_imu_cell(R["Mag"], 3, f"{mag_fields['MZ_UTX100'] / 100.0:.2f} µT")
+                elif "MZ" in mag_fields:
+                    self._set_imu_cell(R["Mag"], 3, f"{mag_fields['MZ'] * 100.0 / 3750.0:.2f} µT")
 
-            # Magnetic vector magnitude
-            if "BMAG_UTX100" in mag_fields:
-                self._set_imu_cell(R["Mag"], 0, f"Mag ({mag_fields['BMAG_UTX100'] / 100.0:.2f} µT)")
+                if "BMAG_UTX100" in mag_fields:
+                    self._set_imu_cell(R["Mag"], 0, f"Mag ({mag_fields['BMAG_UTX100'] / 100.0:.2f} µT)")
+            else:
+                age_ms = mag_fields.get("AGE_MS", 0)
+                init = mag_fields.get("INIT", 0)
+                found = mag_fields.get("FOUND", 0)
+                comm_err = mag_fields.get("COMM_ERR", 0)
+                drdy_tout = mag_fields.get("DRDY_TOUT", 0)
+
+                label_parts = [f"Mag ({state}"]
+                if not found:
+                    label_parts.append(",NO_DEV")
+                elif not init:
+                    label_parts.append(",INIT")
+                if comm_err > 0:
+                    label_parts.append(f",CE:{comm_err}")
+                if drdy_tout > 0:
+                    label_parts.append(f",DT:{drdy_tout}")
+                if age_ms > 0 and age_ms < 99999:
+                    label_parts.append(f",{age_ms}ms")
+                label_parts.append(")")
+                self._set_imu_cell(R["Mag"], 0, "".join(label_parts))
+
+                if mag_fields.get("INIT") == 1 and "MX_UTX100" in mag_fields:
+                    stale_tag = " [STALE]" if state != "ONLINE" else ""
+                    self._set_imu_cell(R["Mag"], 1, f"{mag_fields.get('MX_UTX100', 0) / 100.0:.2f} µT{stale_tag}")
+                    self._set_imu_cell(R["Mag"], 2, f"{mag_fields.get('MY_UTX100', 0) / 100.0:.2f} µT{stale_tag}")
+                    self._set_imu_cell(R["Mag"], 3, f"{mag_fields.get('MZ_UTX100', 0) / 100.0:.2f} µT{stale_tag}")
+                else:
+                    self._set_imu_cell(R["Mag"], 1, f"— {state}")
+                    self._set_imu_cell(R["Mag"], 2, f"— {state}")
+                    self._set_imu_cell(R["Mag"], 3, f"— {state}")
 
             return True
 

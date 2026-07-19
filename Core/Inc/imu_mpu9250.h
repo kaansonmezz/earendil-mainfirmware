@@ -125,6 +125,12 @@ uint32_t IMU_StreamGetPeriod(void);
 uint8_t  IMU_StreamIsEnabled(void);
 void     IMU_StreamTask(void);
 
+/* Per-sensor telemetry period control. */
+void     IMU_GyroSetTelemetryPeriod(uint32_t ms);
+uint32_t IMU_GyroGetTelemetryPeriod(void);
+void     IMU_AccelSetTelemetryPeriod(uint32_t ms);
+uint32_t IMU_AccelGetTelemetryPeriod(void);
+
 /* Gyro output filter API (LPF + deadband, display-only). */
 void     IMU_GyroFilterOn(void);
 void     IMU_GyroFilterOff(void);

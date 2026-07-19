@@ -256,6 +256,8 @@ void CommandHandler_PrintHelp(void)
     Logger_Log(LOG_INFO, "  imu stream on      Enable periodic IMU telemetry");
     Logger_Log(LOG_INFO, "  imu stream off     Disable periodic IMU telemetry");
     Logger_Log(LOG_INFO, "  imu telper <ms>    Set IMU telemetry period (20..5000)");
+    Logger_Log(LOG_INFO, "  gyro telper <ms>   Set gyroscope telemetry period (20..5000)");
+    Logger_Log(LOG_INFO, "  accel telper <ms>  Set accelerometer telemetry period (20..5000)");
     Logger_Log(LOG_INFO, "  imu gyrofilter status  Show gyro output filter settings");
     Logger_Log(LOG_INFO, "  imu gyrofilter on      Enable gyro output filter");
     Logger_Log(LOG_INFO, "  imu gyrofilter off     Disable gyro output filter");
@@ -263,11 +265,13 @@ void CommandHandler_PrintHelp(void)
     Logger_Log(LOG_INFO, "  imu lpf <permille>     Set gyro EMA alpha (1..1000)");
     Logger_Log(LOG_INFO, "");
     Logger_Log(LOG_INFO, "Magnetometer commands:");
-    Logger_Log(LOG_INFO, "  magwho              Detect QMC5883P magnetometer");
-    Logger_Log(LOG_INFO, "  maginit             Initialize QMC5883P magnetometer");
+    Logger_Log(LOG_INFO, "  magwho              Detect QMC5883L magnetometer");
+    Logger_Log(LOG_INFO, "  maginit             Initialize QMC5883L magnetometer");
     Logger_Log(LOG_INFO, "  magraw              Read raw magnetometer X/Y/Z");
     Logger_Log(LOG_INFO, "  magimu              Read compact GUI-friendly magnetometer X/Y/Z");
+    Logger_Log(LOG_INFO, "  magstatus           Full magnetometer diagnostic status");
     Logger_Log(LOG_INFO, "  maghelp             Show magnetometer commands");
+    Logger_Log(LOG_INFO, "  mag telper <ms>     Set magnetometer telemetry period (20..5000)");
     Logger_Log(LOG_INFO, "");
     Logger_Log(LOG_INFO, "Direct motor command:");
     Logger_Log(LOG_INFO, "  FL <text>        Send raw text only to Front Left motor");
@@ -356,6 +360,10 @@ void CommandHandler_Handle(const TerminalCommand_t *cmd)
             case TCMD_MAGRAW:                /* magraw (query) */
             case TCMD_MAGIMU:                /* magimu (query) */
             case TCMD_MAGHELP:               /* maghelp (query) */
+            case TCMD_MAGSTATUS:             /* magstatus (query) */
+            case TCMD_MAG_TELPER:            /* mag telper (config) */
+            case TCMD_GYRO_TELPER:           /* gyro telper (config) */
+            case TCMD_ACCEL_TELPER:          /* accel telper (config) */
             case TCMD_CFGCACHE:              /* cfgcache (query) */
             case TCMD_CFGREAD:               /* cfgread (query) */
             case TCMD_HB:                    /* hb/heartbeat (keepalive) */
@@ -510,7 +518,8 @@ void CommandHandler_Handle(const TerminalCommand_t *cmd)
 
         case TCMD_DRIVE_ARC:
         {
-            uint16_t inner, outer;
+            int32_t  inner;
+            uint16_t outer;
             MotionController_ExecuteArcTurn(
                 cmd->driveIsDuty, cmd->driveTarget,
                 cmd->driveMotion, cmd->driveTurnRatioPermille,
@@ -716,6 +725,8 @@ void CommandHandler_Handle(const TerminalCommand_t *cmd)
             Logger_Log(LOG_INFO, "  imu stream on");
             Logger_Log(LOG_INFO, "  imu stream off");
             Logger_Log(LOG_INFO, "  imu telper <ms>");
+            Logger_Log(LOG_INFO, "  gyro telper <ms>");
+            Logger_Log(LOG_INFO, "  accel telper <ms>");
             Logger_Log(LOG_INFO, "  imu gyrofilter status");
             Logger_Log(LOG_INFO, "  imu gyrofilter on");
             Logger_Log(LOG_INFO, "  imu gyrofilter off");
@@ -734,6 +745,7 @@ void CommandHandler_Handle(const TerminalCommand_t *cmd)
             Logger_Log(LOG_INFO, "  magwho");
             Logger_Log(LOG_INFO, "  maginit");
             Logger_Log(LOG_INFO, "  magraw");
+            Logger_Log(LOG_INFO, "  magstatus");
             Logger_Log(LOG_INFO, "  maghelp");
             break;
         }
@@ -810,7 +822,7 @@ void CommandHandler_Handle(const TerminalCommand_t *cmd)
             {
                 Logger_Log(LOG_INFO,
                            "MAG_WHO,ADDR:0x%02X,DEVADDR_HAL:0x%02X,"
-                           "CHIP:QMC5883P,CHIP_ID:0x%02X,OK:1",
+                           "CHIP:QMC5883L,CHIP_ID:0x%02X,OK:1",
                            (unsigned)mag.addr7,
                            (unsigned)(mag.addr7 << 1),
                            (unsigned)mag.chip_id);
@@ -830,27 +842,96 @@ void CommandHandler_Handle(const TerminalCommand_t *cmd)
 
         case TCMD_MAGINIT:
         {
+            /* Non-blocking: restart the magnetometer state machine.
+             * Guard: do NOT reset the state machine if init is actively
+             * in progress (RESETTING, SETRESET, CTRL1, VERIFY, STABILIZING,
+             * or RECOVERING).  This prevents rapid-fire maginit commands
+             * from continuously pulling the state machine back to OFFLINE. */
+
             extern I2C_HandleTypeDef hi2c1;
-            HAL_StatusTypeDef st = MAG_QMC5883P_Init(&hi2c1, &g_mag_handle);
-            if (st == HAL_OK && g_mag_handle.initialized)
+
+            switch (g_mag_handle.state)
             {
-                uint8_t sr = 0, ctrl2 = 0, ctrl1 = 0;
-                MAG_QMC5883P_ReadReg(&hi2c1, MAG_QMC5883P_REG_SET_RESET, &sr);
-                MAG_QMC5883P_ReadReg(&hi2c1, MAG_QMC5883P_REG_CTRL2, &ctrl2);
-                MAG_QMC5883P_ReadReg(&hi2c1, MAG_QMC5883P_REG_CTRL1, &ctrl1);
+            case MAG_STATE_RESETTING:
+            case MAG_STATE_WAIT_RESET:
+            case MAG_STATE_SETRESET:
+            case MAG_STATE_WAIT_SETRESET:
+            case MAG_STATE_CTRL1:
+            case MAG_STATE_WAIT_CTRL1:
+            case MAG_STATE_VERIFY:
+            case MAG_STATE_STABILIZING:
+                Logger_Log(LOG_INFO, "MAG_INIT,ALREADY_IN_PROGRESS,STATE:%s",
+                           (g_mag_handle.state == MAG_STATE_RESETTING)     ? "RESETTING" :
+                           (g_mag_handle.state == MAG_STATE_WAIT_RESET)    ? "WAIT_RESET" :
+                           (g_mag_handle.state == MAG_STATE_SETRESET)      ? "SETRESET" :
+                           (g_mag_handle.state == MAG_STATE_WAIT_SETRESET) ? "WAIT_SETRESET" :
+                           (g_mag_handle.state == MAG_STATE_CTRL1)        ? "CTRL1" :
+                           (g_mag_handle.state == MAG_STATE_WAIT_CTRL1)   ? "WAIT_CTRL1" :
+                           (g_mag_handle.state == MAG_STATE_VERIFY)       ? "VERIFY" :
+                                                                             "STABILIZING");
+                break;
+
+            case MAG_STATE_RECOVERING:
+                /* Bus recovery is already in progress — don't restart */
+                Logger_Log(LOG_INFO, "MAG_INIT,ALREADY_IN_PROGRESS,STATE:RECOVERING");
+                break;
+
+            case MAG_STATE_ONLINE:
+                /* Manual re-init from ONLINE — controlled restart */
+                MAG_QMC5883L_RuntimeReset(1);
+                Logger_Log(LOG_INFO, "MAG_INIT,RESTART_FROM_ONLINE");
+                /* State machine is now OFFLINE with immediate probe scheduled */
+                break;
+
+            case MAG_STATE_OFFLINE:
+            case MAG_STATE_FAULT:
+            default:
+            {
+                /* OFFLINE or FAULT — normal restart allowed.
+                 * Evaluate bus health before scheduling probe. */
+                MAG_QMC5883L_RuntimeReset(1);
+
+                GPIO_PinState sda = HAL_GPIO_ReadPin(GPIOB, GPIO_PIN_9);
+                GPIO_PinState scl = HAL_GPIO_ReadPin(GPIOB, GPIO_PIN_8);
+                HAL_I2C_StateTypeDef i2c_state = HAL_I2C_GetState(&hi2c1);
+                uint32_t hal_err = g_mag_handle.last_hal_error;
+                HAL_StatusTypeDef hal_st = g_mag_handle.last_hal_status;
+
+                /* Determine if bus/peripheral recovery is needed:
+                 * - SDA or SCL low → physical bus stuck
+                 * - I2C peripheral not READY → state machine stuck
+                 * - HAL_BUSY → peripheral locked
+                 * - BERR (bit error), ARLO (arbitration lost), OVR (overrun) */
+                uint8_t bus_stuck = (sda == GPIO_PIN_RESET || scl == GPIO_PIN_RESET) ? 1U : 0U;
+                uint8_t periph_stuck = (i2c_state != HAL_I2C_STATE_READY) ? 1U : 0U;
+                uint8_t hal_busy = (hal_st == HAL_BUSY) ? 1U : 0U;
+                uint8_t bus_error = (hal_err & (HAL_I2C_ERROR_BERR | HAL_I2C_ERROR_ARLO |
+                                                HAL_I2C_ERROR_OVR)) ? 1U : 0U;
+                uint8_t timeout_hist = (hal_st == HAL_TIMEOUT) ? 1U : 0U;
+
+                uint8_t recovery_needed = bus_stuck || periph_stuck || hal_busy ||
+                                          bus_error || timeout_hist;
+
                 Logger_Log(LOG_INFO,
-                           "MAG_INIT,CHIP:QMC5883L,ADDR:0x%02X,CHIP_ID:0x%02X,"
-                           "SETRST:0x%02X,CTRL2:0x%02X,CTRL1:0x%02X,OK:1",
-                           (unsigned)g_mag_handle.addr7,
-                           (unsigned)g_mag_handle.chip_id,
-                           (unsigned)sr, (unsigned)ctrl2, (unsigned)ctrl1);
+                           "MAG_INIT,BUS_CHECK,SDA:%u,SCL:%u,I2C_ST:%lu,"
+                           "HAL_ST:%d,HAL_ERR:%lu,RECOVERY:%u",
+                           (sda == GPIO_PIN_SET) ? 1U : 0U,
+                           (scl == GPIO_PIN_SET) ? 1U : 0U,
+                           (unsigned long)i2c_state,
+                           (int)hal_st, (unsigned long)hal_err,
+                           recovery_needed);
+
+                if (recovery_needed)
+                {
+                    Logger_Log(LOG_INFO, "MAG_INIT,BUS_RECOVERY_REQUIRED");
+                    g_mag_handle.state = MAG_STATE_RECOVERING;
+                }
+                else
+                {
+                    Logger_Log(LOG_INFO, "MAG_INIT,RESTART_SCHEDULED");
+                }
+                break;
             }
-            else
-            {
-                const char *err = "UNKNOWN";
-                if (!g_mag_handle.found) err = "NOT_FOUND";
-                else if (g_mag_handle.chip_id != MAG_QMC5883P_CHIP_ID_EXPECTED) err = "CHIP_ID";
-                Logger_Log(LOG_INFO, "MAG_INIT,OK:0,ERR:%s", err);
             }
             break;
         }
@@ -866,7 +947,7 @@ void CommandHandler_Handle(const TerminalCommand_t *cmd)
                 uint8_t ovfl = (raw.status & MAG_QMC5883P_STATUS_OVFL) ? 1U : 0U;
                 Logger_Log(LOG_INFO,
                            "MAG_RAW,X:%d,Y:%d,Z:%d,"
-                           "STATUS:0x%02X,DRDY:%u,OVFL:%u,CHIP:QMC5883P,OK:1",
+                           "STATUS:0x%02X,DRDY:%u,OVFL:%u,CHIP:QMC5883L,OK:1",
                            (int)raw.x, (int)raw.y, (int)raw.z,
                            (unsigned)raw.status, drdy, ovfl);
             }
@@ -890,7 +971,49 @@ void CommandHandler_Handle(const TerminalCommand_t *cmd)
             Logger_Log(LOG_INFO, "MAG_HELP,maginit");
             Logger_Log(LOG_INFO, "MAG_HELP,magraw");
             Logger_Log(LOG_INFO, "MAG_HELP,magimu");
+            Logger_Log(LOG_INFO, "MAG_HELP,magstatus");
             Logger_Log(LOG_INFO, "MAG_HELP,maghelp");
+            Logger_Log(LOG_INFO, "MAG_HELP,mag telper <ms>");
+            break;
+        }
+
+        case TCMD_MAGSTATUS:
+        {
+            extern I2C_HandleTypeDef hi2c1;
+            MAG_QMC5883L_PrintStatus(&hi2c1);
+            break;
+        }
+
+        case TCMD_MAG_TELPER:
+        {
+            if (!cmd->hasValue)
+            {
+                Logger_Log(LOG_INFO, "MAG_TELPER,ERR:MISSING_VALUE,OK:0");
+                break;
+            }
+            MAG_SetTelemetryPeriod(cmd->value);
+            break;
+        }
+
+        case TCMD_GYRO_TELPER:
+        {
+            if (!cmd->hasValue)
+            {
+                Logger_Log(LOG_INFO, "GYRO_TELPER,ERR:MISSING_VALUE,OK:0");
+                break;
+            }
+            IMU_GyroSetTelemetryPeriod(cmd->value);
+            break;
+        }
+
+        case TCMD_ACCEL_TELPER:
+        {
+            if (!cmd->hasValue)
+            {
+                Logger_Log(LOG_INFO, "ACCEL_TELPER,ERR:MISSING_VALUE,OK:0");
+                break;
+            }
+            IMU_AccelSetTelemetryPeriod(cmd->value);
             break;
         }
 

@@ -753,6 +753,58 @@ bool TerminalParser_Parse(const char *line, TerminalCommand_t *outResult)
             return true;
         }
 
+        /* imu telper gyro <ms> (alias: gyro telper <ms>) */
+        if (strncmp(rest, "telper gyro ", 12) == 0)
+        {
+            const char *valStr = rest + 12;
+            while (*valStr == ' ')
+                valStr++;
+            if (*valStr == '\0')
+            {
+                outResult->type = TCMD_GYRO_TELPER;
+                outResult->value = 0;
+                outResult->hasValue = false;
+                return true;
+            }
+            if (!allDigits(valStr))
+            {
+                outResult->type = TCMD_GYRO_TELPER;
+                outResult->value = 0;
+                outResult->hasValue = false;
+                return true;
+            }
+            outResult->type = TCMD_GYRO_TELPER;
+            outResult->value = (uint16_t)atoi(valStr);
+            outResult->hasValue = true;
+            return true;
+        }
+
+        /* imu telper accel <ms> (alias: accel telper <ms>) */
+        if (strncmp(rest, "telper accel ", 13) == 0)
+        {
+            const char *valStr = rest + 13;
+            while (*valStr == ' ')
+                valStr++;
+            if (*valStr == '\0')
+            {
+                outResult->type = TCMD_ACCEL_TELPER;
+                outResult->value = 0;
+                outResult->hasValue = false;
+                return true;
+            }
+            if (!allDigits(valStr))
+            {
+                outResult->type = TCMD_ACCEL_TELPER;
+                outResult->value = 0;
+                outResult->hasValue = false;
+                return true;
+            }
+            outResult->type = TCMD_ACCEL_TELPER;
+            outResult->value = (uint16_t)atoi(valStr);
+            outResult->hasValue = true;
+            return true;
+        }
+
         /* imu gyrofilter status / on / off */
         if (strncmp(rest, "gyrofilter ", 11) == 0)
         {
@@ -865,6 +917,91 @@ bool TerminalParser_Parse(const char *line, TerminalCommand_t *outResult)
     if (strcmp(buf, "maghelp") == 0)
     {
         outResult->type = TCMD_MAGHELP;
+        return true;
+    }
+
+    /* ── 5w. magstatus (magnetometer full diagnostic status) ────── */
+    if (strcmp(buf, "magstatus") == 0)
+    {
+        outResult->type = TCMD_MAGSTATUS;
+        return true;
+    }
+
+    /* ── 5x. mag telper <ms> ───────────────────────────────────── */
+    if (strncmp(buf, "mag telper", 10) == 0)
+    {
+        const char *valStr = buf + 10;
+        while (*valStr == ' ')
+            valStr++;
+        if (*valStr == '\0')
+        {
+            outResult->type = TCMD_MAG_TELPER;
+            outResult->value = 0;
+            outResult->hasValue = false;
+            return true;
+        }
+        if (!allDigits(valStr))
+        {
+            outResult->type = TCMD_MAG_TELPER;
+            outResult->value = 0;
+            outResult->hasValue = false;
+            return true;
+        }
+        outResult->type = TCMD_MAG_TELPER;
+        outResult->value = (uint16_t)atoi(valStr);
+        outResult->hasValue = true;
+        return true;
+    }
+
+    /* ── 5y. gyro telper <ms> ──────────────────────────────────── */
+    if (strncmp(buf, "gyro telper", 11) == 0)
+    {
+        const char *valStr = buf + 11;
+        while (*valStr == ' ')
+            valStr++;
+        if (*valStr == '\0')
+        {
+            outResult->type = TCMD_GYRO_TELPER;
+            outResult->value = 0;
+            outResult->hasValue = false;
+            return true;
+        }
+        if (!allDigits(valStr))
+        {
+            outResult->type = TCMD_GYRO_TELPER;
+            outResult->value = 0;
+            outResult->hasValue = false;
+            return true;
+        }
+        outResult->type = TCMD_GYRO_TELPER;
+        outResult->value = (uint16_t)atoi(valStr);
+        outResult->hasValue = true;
+        return true;
+    }
+
+    /* ── 5z. accel telper <ms> ─────────────────────────────────── */
+    if (strncmp(buf, "accel telper", 12) == 0)
+    {
+        const char *valStr = buf + 12;
+        while (*valStr == ' ')
+            valStr++;
+        if (*valStr == '\0')
+        {
+            outResult->type = TCMD_ACCEL_TELPER;
+            outResult->value = 0;
+            outResult->hasValue = false;
+            return true;
+        }
+        if (!allDigits(valStr))
+        {
+            outResult->type = TCMD_ACCEL_TELPER;
+            outResult->value = 0;
+            outResult->hasValue = false;
+            return true;
+        }
+        outResult->type = TCMD_ACCEL_TELPER;
+        outResult->value = (uint16_t)atoi(valStr);
+        outResult->hasValue = true;
         return true;
     }
 

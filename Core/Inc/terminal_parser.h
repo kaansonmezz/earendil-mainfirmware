@@ -85,11 +85,15 @@ typedef enum
     TCMD_IMU_GYROFILTER_OFF,    /* imu gyrofilter off */
     TCMD_IMU_DEADBAND,          /* imu deadband <mdps> */
     TCMD_IMU_LPF,               /* imu lpf <alpha_permille> */
-    TCMD_MAGWHO,                /* magwho : detect QMC5883P magnetometer */
-    TCMD_MAGINIT,               /* maginit : init QMC5883P magnetometer */
+    TCMD_MAGWHO,                /* magwho : detect QMC5883L magnetometer */
+    TCMD_MAGINIT,               /* maginit : init QMC5883L magnetometer */
     TCMD_MAGRAW,                /* magraw : read raw magnetometer X/Y/Z */
     TCMD_MAGIMU,                /* magimu : read compact GUI-friendly magnetometer X/Y/Z */
     TCMD_MAGHELP,               /* maghelp : show magnetometer commands */
+    TCMD_MAGSTATUS,             /* magstatus : full magnetometer diagnostic status */
+    TCMD_MAG_TELPER,            /* mag telper <ms> : set magnetometer telemetry period */
+    TCMD_GYRO_TELPER,           /* gyro telper <ms> : set gyroscope telemetry period */
+    TCMD_ACCEL_TELPER,          /* accel telper <ms> : set accelerometer telemetry period */
     TCMD_DRIVE_ARC,             /* drive <rpm|duty> <target> <fl|fr|bl|br> tr <decimal> */
     TCMD_CFGCACHE,              /* cfgcache [FL|FR|RL|RR] : print cached tuning config */
     TCMD_CFGREAD,               /* cfgread FL|FR|RL|RR|all : request cfg from motor(s) */

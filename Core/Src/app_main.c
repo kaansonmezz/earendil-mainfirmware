@@ -31,14 +31,32 @@ static char s_termLine[TERMINAL_RX_BUF_SIZE];
 void App_Init(void)
 {
     Logger_Init();
-    I2C_ScanBus();
 
-    /* Auto-init magnetometer (QMC5883L) at startup */
+    /* Probe only known I2C addresses at startup (not full scan).
+     * Full scan is available via the 'i2cscan' terminal command. */
     {
         extern I2C_HandleTypeDef hi2c1;
-        HAL_StatusTypeDef mag_st = MAG_QMC5883P_Init(&hi2c1, &g_mag_handle);
-        if (mag_st != HAL_OK)
-            Logger_Log(LOG_BOOT, "QMC5883P magnetometer init FAILED (will retry on read)");
+        uint32_t err = 0;
+
+        /* Probe MPU9250 at 0x68 */
+        HAL_StatusTypeDef mpu_st = HAL_I2C_IsDeviceReady(&hi2c1,
+                                    (uint16_t)(0x68U << 1), 2, 5);
+        Logger_Log(LOG_BOOT, "I2C_PROBE,MPU9250:0x68,HAL:%d,ERR:%lu",
+                   (int)mpu_st, (unsigned long)err);
+
+        /* Probe QMC5883L at 0x0D */
+        HAL_StatusTypeDef mag_st = HAL_I2C_IsDeviceReady(&hi2c1,
+                                    (uint16_t)(0x0DU << 1), 2, 5);
+        Logger_Log(LOG_BOOT, "I2C_PROBE,QMC5883L:0x0D,HAL:%d,ERR:%lu",
+                   (int)mag_st, (unsigned long)err);
+    }
+
+    /* Magnetometer will be managed by the state machine in App_Update.
+     * Initial state is OFFLINE; it will probe and connect automatically. */
+    {
+        extern MAG_QMC5883L_Handle_t g_mag_handle;
+        g_mag_handle.state = MAG_STATE_OFFLINE;
+        g_mag_handle.last_reconnect_tick = 0;  /* trigger first probe immediately */
     }
 
     TerminalIf_Init();
@@ -99,6 +117,13 @@ void App_Update(void)
 
     /* ── Periodic IMU stream (non-blocking) ───────────────────────── */
     IMU_StreamTask();
+
+    /* ── Magnetometer state machine (non-blocking) ───────────────── */
+    {
+        extern I2C_HandleTypeDef hi2c1;
+        MAG_QMC5883L_Task(&hi2c1);
+        MAG_QMC5883L_Telemetry(&hi2c1);
+    }
 
     /* NOTE: DISARM is a logical safety lock only — the CPU is never put into
      * WFI/STOP/STANDBY.  The main loop always runs at full speed so SWD debug

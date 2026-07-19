@@ -4,6 +4,23 @@
 #include "stm32h7xx_hal.h"
 #include "rover_types.h"
 
+/* ── Shared I2C1 timing constant ──────────────────────────────────────────
+ * I2C1 kernel clock = 130 MHz (RCC.I2C123Freq_Value, APB1 default source).
+ *
+ * TIMINGR field decode:
+ *   [31:28] PRESC   = 0x4 = 4   → tPRESC = 130 MHz / (4+1) = 26 MHz → 38.46 ns
+ *   [27:24] reserved = 0x0      → must be zero
+ *   [23:20] SCLDEL  = 0x3 = 3   → data setup time = 3 × 38.46 ns = 115 ns
+ *   [19:16] SDADEL  = 0x2 = 2   → data hold time  = 2 × 38.46 ns = 77 ns
+ *   [15:8]  SCLH    = 0xF9 = 249 → SCL high period = 250 × 38.46 ns = 9.615 µs
+ *   [7:0]   SCLL    = 0xF9 = 249 → SCL low period  = 250 × 38.46 ns = 9.615 µs
+ *   SCL period = (SCLH+1 + SCLL+1) × tPRESC = 500 × 38.46 ns = 19.23 µs
+ *   SCL frequency ≈ 52 kHz
+ *
+ * Original CubeMX value 0x20A0ACFE gave ~100 kHz.
+ * Final measurement must be confirmed with oscilloscope or logic analyzer on PB8/PB9. */
+#define I2C_TIMING_APP  0x4032F9F9U
+
 /* ── Terminal (USART3) ──────────────────────────────────────────────────── */
 #define TERMINAL_RX_BUF_SIZE    128
 #define TERMINAL_TX_BUF_SIZE    256

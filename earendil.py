@@ -207,6 +207,8 @@ _RE_OP_MODE_CONFIRM = re.compile(
 
 # -- IMU telemetry pattern ---------------------------------------------------
 #   [INFO] MPU_IMU,AX:<mg>,AY:<mg>,AZ:<mg>,GX:<mdps>,GY:<mdps>,GZ:<mdps>,TC:<cx100>,...
+#   [INFO] MPU_GYRO,GX:<mdps>,GY:<mdps>,GZ:<mdps>,TC:<cx100>,...
+#   [INFO] MPU_ACCEL,AX:<mg>,AY:<mg>,AZ:<mg>,TC:<cx100>,...
 def _parse_kv_payload(line: str, marker: str) -> dict[str, int] | None:
     """Generic key:value parser for firmware telemetry lines.
 
@@ -257,7 +259,7 @@ _RE_ARM_RX_RECORD = re.compile(
 )
 _RE_IMU_STREAM_STATUS = re.compile(
     rf"^{_LOG_LEVEL_PREFIX}IMU_STREAM,EN:(?P<enabled>[01])"
-    rf"(?:,PERIOD_MS:\d+)?,OK:1\s*$"
+    rf"(?:,[A-Z_]+:\d+)*,OK:1\s*$"
 )
 _RE_LEADING_ARM = re.compile(r"^(?:arm(?:\s+|$))+", re.IGNORECASE)
 
@@ -2392,8 +2394,8 @@ class EarendilControlGui(QMainWindow):
         """
 
     # -- Constants ----------------------------------------------------------
-    REPEAT_INTERVAL_MS = 500
-    ARC_REPEAT_INTERVAL_MS = 500
+    REPEAT_INTERVAL_MS = 100
+    ARC_REPEAT_INTERVAL_MS = 100
     TUNING_SEND_INTERVAL_MS = 100
     # How long the GUI waits for an H7 confirmation of an operating-mode
     # command before warning that the mode change was not confirmed.
@@ -2735,12 +2737,16 @@ class EarendilControlGui(QMainWindow):
         # 0.0 means "never received since connect".
         self._freshness_motor: dict[str, float] = {m: 0.0 for m in ("FL", "FR", "RL", "RR")}
         self._freshness_imu: float = 0.0
+        self._freshness_gyro: float = 0.0
+        self._freshness_accel: float = 0.0
         self._freshness_mag: float = 0.0
         self._freshness_arm: float = 0.0
         self._freshness_drill: float = 0.0
         # Previous stale states for transition logging.
         self._freshness_motor_stale: dict[str, bool] = {m: False for m in ("FL", "FR", "RL", "RR")}
         self._freshness_imu_stale: bool = False
+        self._freshness_gyro_stale: bool = False
+        self._freshness_accel_stale: bool = False
         self._freshness_mag_stale: bool = False
         self._freshness_arm_stale: bool = False
         self._freshness_drill_stale: bool = False
@@ -5274,9 +5280,13 @@ class EarendilControlGui(QMainWindow):
             self._telemetry_expected[key] = expected
         if restart:
             self._freshness_imu = 0.0
+            self._freshness_gyro = 0.0
+            self._freshness_accel = 0.0
             self._freshness_mag = 0.0
         if expected is not True or restart:
             self._freshness_imu_stale = False
+            self._freshness_gyro_stale = False
+            self._freshness_accel_stale = False
             self._freshness_mag_stale = False
 
     def _clear_sensor_one_shots(self):
@@ -5346,6 +5356,8 @@ class EarendilControlGui(QMainWindow):
         self._telemetry_expected_since["MAG"] = (
             self._freshness_mag if self._freshness_mag > 0.0 else now)
         self._freshness_imu_stale = False
+        self._freshness_gyro_stale = False
+        self._freshness_accel_stale = False
         self._freshness_mag_stale = False
         self._set_imu_stream_state(self.IMU_STREAM_ON)
         self._update_freshness_ui()
@@ -5356,8 +5368,12 @@ class EarendilControlGui(QMainWindow):
         self._set_imu_stream_state(self.IMU_STREAM_UNKNOWN)
         self._set_shared_imu_mag_expectation(None)
         self._freshness_imu = 0.0
+        self._freshness_gyro = 0.0
+        self._freshness_accel = 0.0
         self._freshness_mag = 0.0
         self._freshness_imu_stale = False
+        self._freshness_gyro_stale = False
+        self._freshness_accel_stale = False
         self._freshness_mag_stale = False
         self._clear_sensor_one_shots()
         self._clear_imu_stream_detection()
@@ -5455,6 +5471,8 @@ class EarendilControlGui(QMainWindow):
         if enabled:
             self._set_shared_imu_mag_expectation(True)
             self._freshness_imu_stale = False
+            self._freshness_gyro_stale = False
+            self._freshness_accel_stale = False
             self._freshness_mag_stale = False
             self._set_imu_stream_state(self.IMU_STREAM_ON)
         else:
@@ -5518,7 +5536,17 @@ class EarendilControlGui(QMainWindow):
 
     def _touch_imu_freshness(self, record_kind: str = "MPU_IMU"):
         now = time.monotonic()
+        # Transport-level: any valid MPU message means the link is alive.
         self._freshness_imu = now
+        # Per-sensor freshness: only update the relevant channel(s).
+        if record_kind == "MPU_GYRO":
+            self._freshness_gyro = now
+        elif record_kind == "MPU_ACCEL":
+            self._freshness_accel = now
+        else:
+            # MPU_IMU (legacy combined), MPU_RAW, MPU_CONV_MILLI carry both.
+            self._freshness_gyro = now
+            self._freshness_accel = now
         if self._imu_one_shot_session_id == self._tcp_session_id:
             # Satisfy the one-shot on its first valid record, preserving the
             # TCP-9.1 behavior.  A short session-bound guard also excludes
@@ -5532,7 +5560,7 @@ class EarendilControlGui(QMainWindow):
         if self._imu_stream_state == self.IMU_STREAM_STARTING:
             self._clear_imu_stream_detection()
             self._set_imu_stream_state(self.IMU_STREAM_ON)
-        elif record_kind == "MPU_IMU":
+        elif record_kind in ("MPU_IMU", "MPU_GYRO", "MPU_ACCEL"):
             self._observe_imu_stream_candidate(now)
 
     def _touch_mag_freshness(self):
@@ -5595,6 +5623,8 @@ class EarendilControlGui(QMainWindow):
         # Optional subsystems (IMU, MAG, ARM, DRILL)
         for key, ts_attr, stale_attr, threshold, name in [
             ("IMU",   "_freshness_imu",   "_freshness_imu_stale",   IMU_TELEMETRY_STALE_MS,   "IMU"),
+            ("IMU",   "_freshness_gyro",  "_freshness_gyro_stale",  IMU_TELEMETRY_STALE_MS,   "Gyro"),
+            ("IMU",   "_freshness_accel", "_freshness_accel_stale", IMU_TELEMETRY_STALE_MS,   "Accel"),
             ("MAG",   "_freshness_mag",   "_freshness_mag_stale",   MAG_TELEMETRY_STALE_MS,   "MAG"),
             ("ARM",   "_freshness_arm",   "_freshness_arm_stale",   ARM_TELEMETRY_STALE_MS,   "Arm"),
             ("DRILL", "_freshness_drill", "_freshness_drill_stale", DRILL_TELEMETRY_STALE_MS, "Drill"),
@@ -5645,19 +5675,32 @@ class EarendilControlGui(QMainWindow):
                 self._log_info(f"{name} telemetry recovered")
 
     def _sensor_freshness_label(self, key: str) -> str:
-        """Return the independently computed IMU or MAG UI state."""
+        """Return the independently computed IMU, Gyro, Accel, or MAG UI state."""
         if not self._tcp_is_connected():
             return "DISCONNECTED"
-        expected = self._telemetry_expected.get(key)
+        expected = self._telemetry_expected.get(key if key not in ("Gyro", "Accel") else "IMU")
         if expected is False:
             return "IDLE"
         if expected is None:
             return "UNKNOWN"
-        stale = (self._freshness_imu_stale if key == "IMU"
-                 else self._freshness_mag_stale)
+        if key == "Gyro":
+            stale = self._freshness_gyro_stale
+        elif key == "Accel":
+            stale = self._freshness_accel_stale
+        elif key == "IMU":
+            stale = self._freshness_imu_stale
+        else:
+            stale = self._freshness_mag_stale
         if stale:
             return "STALE"
-        timestamp = self._freshness_imu if key == "IMU" else self._freshness_mag
+        if key == "Gyro":
+            timestamp = self._freshness_gyro
+        elif key == "Accel":
+            timestamp = self._freshness_accel
+        elif key == "IMU":
+            timestamp = self._freshness_imu
+        else:
+            timestamp = self._freshness_mag
         if timestamp <= 0.0:
             return ("STARTING" if self._imu_stream_state == self.IMU_STREAM_STARTING
                     else "UNKNOWN")
@@ -5713,7 +5756,8 @@ class EarendilControlGui(QMainWindow):
         if hasattr(self, "_imu_grp"):
             if connected:
                 title = (
-                    f"IMU / MAG — IMU: {self._sensor_freshness_label('IMU')} | "
+                    f"IMU / MAG — Gyro: {self._sensor_freshness_label('Gyro')} | "
+                    f"Accel: {self._sensor_freshness_label('Accel')} | "
                     f"MAG: {self._sensor_freshness_label('MAG')}"
                 )
             else:
@@ -5967,7 +6011,8 @@ class EarendilControlGui(QMainWindow):
     def _parse_imu_line(self, line: str) -> bool:
         """Detect and parse MPU/MAG one-shot and periodic telemetry records.
 
-        Supports compact (MPU_IMU), detailed (MPU_CONV_MILLI), and magnetometer (MAG_IMU) formats.
+        Supports compact (MPU_IMU), detailed (MPU_CONV_MILLI), split
+        (MPU_GYRO / MPU_ACCEL), and magnetometer (MAG_IMU) formats.
         Unknown extra fields are ignored.  Missing fields keep last value.
         Returns True when the line contained recognized IMU telemetry.
         """
@@ -5985,7 +6030,39 @@ class EarendilControlGui(QMainWindow):
                 self._touch_mag_freshness()
             return True
 
-        # Try MPU_IMU first
+        # Split gyro-only record (MPU_GYRO,GX:...,GY:...,GZ:...,TC:...,OK:1)
+        gyro_fields = _parse_kv_payload(line, "MPU_GYRO,")
+        if gyro_fields is not None:
+            if gyro_fields.get("OK") == 1:
+                R = self._IMU_ROW
+                if "GX" in gyro_fields:
+                    self._set_imu_cell(R["Gyro"], 1, f"{gyro_fields['GX'] / 1000.0:.1f} dps")
+                if "GY" in gyro_fields:
+                    self._set_imu_cell(R["Gyro"], 2, f"{gyro_fields['GY'] / 1000.0:.1f} dps")
+                if "GZ" in gyro_fields:
+                    self._set_imu_cell(R["Gyro"], 3, f"{gyro_fields['GZ'] / 1000.0:.1f} dps")
+                if "TC" in gyro_fields:
+                    self._set_imu_cell(R["Temp"], 1, f"{gyro_fields['TC'] / 100.0:.1f} °C")
+                self._touch_imu_freshness("MPU_GYRO")
+            return True
+
+        # Split accel-only record (MPU_ACCEL,AX:...,AY:...,AZ:...,TC:...,OK:1)
+        accel_fields = _parse_kv_payload(line, "MPU_ACCEL,")
+        if accel_fields is not None:
+            if accel_fields.get("OK") == 1:
+                R = self._IMU_ROW
+                if "AX" in accel_fields:
+                    self._set_imu_cell(R["Accel"], 1, f"{accel_fields['AX'] / 1000.0:.4f} g")
+                if "AY" in accel_fields:
+                    self._set_imu_cell(R["Accel"], 2, f"{accel_fields['AY'] / 1000.0:.4f} g")
+                if "AZ" in accel_fields:
+                    self._set_imu_cell(R["Accel"], 3, f"{accel_fields['AZ'] / 1000.0:.4f} g")
+                if "TC" in accel_fields:
+                    self._set_imu_cell(R["Temp"], 1, f"{accel_fields['TC'] / 100.0:.1f} °C")
+                self._touch_imu_freshness("MPU_ACCEL")
+            return True
+
+        # Try MPU_IMU first (legacy combined format)
         fields = _parse_kv_payload(line, "MPU_IMU,")
         record_kind = "MPU_IMU"
         if fields is None:
@@ -6009,32 +6086,72 @@ class EarendilControlGui(QMainWindow):
         # Try MAG_IMU
         mag_fields = _parse_kv_payload(line, "MAG_IMU,")
         if mag_fields is not None:
-            if mag_fields.get("OK") != 1:
-                return True
             R = self._IMU_ROW
+            state = mag_fields.get("STATE", "UNKNOWN")
+            ok = mag_fields.get("OK", 0)
 
-            # Magnetometer: prefer physical units (UTX100) over raw
-            if "MX_UTX100" in mag_fields:
-                self._set_imu_cell(R["Mag"], 1, f"{mag_fields['MX_UTX100'] / 100.0:.2f} µT")
-            elif "MX" in mag_fields:
-                # Fallback: convert raw to µT (3750 LSB/Gauss, 1 Gauss = 100 µT)
-                self._set_imu_cell(R["Mag"], 1, f"{mag_fields['MX'] * 100.0 / 3750.0:.2f} µT")
+            if ok == 1:
+                # Magnetometer: prefer physical units (UTX100) over raw
+                if "MX_UTX100" in mag_fields:
+                    self._set_imu_cell(R["Mag"], 1, f"{mag_fields['MX_UTX100'] / 100.0:.2f} µT")
+                elif "MX" in mag_fields:
+                    # Fallback: convert raw to µT (3750 LSB/Gauss, 1 Gauss = 100 µT)
+                    self._set_imu_cell(R["Mag"], 1, f"{mag_fields['MX'] * 100.0 / 3750.0:.2f} µT")
 
-            if "MY_UTX100" in mag_fields:
-                self._set_imu_cell(R["Mag"], 2, f"{mag_fields['MY_UTX100'] / 100.0:.2f} µT")
-            elif "MY" in mag_fields:
-                self._set_imu_cell(R["Mag"], 2, f"{mag_fields['MY'] * 100.0 / 3750.0:.2f} µT")
+                if "MY_UTX100" in mag_fields:
+                    self._set_imu_cell(R["Mag"], 2, f"{mag_fields['MY_UTX100'] / 100.0:.2f} µT")
+                elif "MY" in mag_fields:
+                    self._set_imu_cell(R["Mag"], 2, f"{mag_fields['MY'] * 100.0 / 3750.0:.2f} µT")
 
-            if "MZ_UTX100" in mag_fields:
-                self._set_imu_cell(R["Mag"], 3, f"{mag_fields['MZ_UTX100'] / 100.0:.2f} µT")
-            elif "MZ" in mag_fields:
-                self._set_imu_cell(R["Mag"], 3, f"{mag_fields['MZ'] * 100.0 / 3750.0:.2f} µT")
+                if "MZ_UTX100" in mag_fields:
+                    self._set_imu_cell(R["Mag"], 3, f"{mag_fields['MZ_UTX100'] / 100.0:.2f} µT")
+                elif "MZ" in mag_fields:
+                    self._set_imu_cell(R["Mag"], 3, f"{mag_fields['MZ'] * 100.0 / 3750.0:.2f} µT")
 
-            # Magnetic vector magnitude
-            if "BMAG_UTX100" in mag_fields:
-                self._set_imu_cell(R["Mag"], 0, f"Mag ({mag_fields['BMAG_UTX100'] / 100.0:.2f} µT)")
+                # Magnetic vector magnitude
+                if "BMAG_UTX100" in mag_fields:
+                    self._set_imu_cell(R["Mag"], 0, f"Mag ({mag_fields['BMAG_UTX100'] / 100.0:.2f} µT)")
 
-            self._touch_mag_freshness()
+                self._touch_mag_freshness()
+            else:
+                # OK:0 — show state and health, don't show stale values as fresh
+                age_ms = mag_fields.get("AGE_MS", 0)
+                init = mag_fields.get("INIT", 0)
+                found = mag_fields.get("FOUND", 0)
+                comm_err = mag_fields.get("COMM_ERR", 0)
+                drdy_tout = mag_fields.get("DRDY_TOUT", 0)
+                verify_mm = mag_fields.get("VERIFY_MM", 0)
+
+                # Build status label
+                label_parts = [f"Mag ({state}"]
+                if not found:
+                    label_parts.append(",NO_DEV")
+                elif not init:
+                    label_parts.append(",INIT")
+                if comm_err > 0:
+                    label_parts.append(f",CE:{comm_err}")
+                if drdy_tout > 0:
+                    label_parts.append(f",DT:{drdy_tout}")
+                if verify_mm > 0:
+                    label_parts.append(f",VM:{verify_mm}")
+                if age_ms > 0 and age_ms < 99999:
+                    label_parts.append(f",{age_ms}ms")
+                label_parts.append(")")
+                self._set_imu_cell(R["Mag"], 0, "".join(label_parts))
+
+                # Show last known values with STALE marker if available
+                if mag_fields.get("INIT") == 1 and "MX_UTX100" in mag_fields:
+                    stale_tag = " [STALE]" if state != "ONLINE" else ""
+                    self._set_imu_cell(R["Mag"], 1, f"{mag_fields.get('MX_UTX100', 0) / 100.0:.2f} µT{stale_tag}")
+                    self._set_imu_cell(R["Mag"], 2, f"{mag_fields.get('MY_UTX100', 0) / 100.0:.2f} µT{stale_tag}")
+                    self._set_imu_cell(R["Mag"], 3, f"{mag_fields.get('MZ_UTX100', 0) / 100.0:.2f} µT{stale_tag}")
+                else:
+                    self._set_imu_cell(R["Mag"], 1, f"— {state}")
+                    self._set_imu_cell(R["Mag"], 2, f"— {state}")
+                    self._set_imu_cell(R["Mag"], 3, f"— {state}")
+
+            # Always mark transport alive (message was received)
+            # Sample freshness is only updated on OK:1 via _touch_mag_freshness
             return True
 
         if fields is None:
@@ -6678,15 +6795,27 @@ class EarendilControlGui(QMainWindow):
         if key_id in self.MOVEMENT_KEYS:
             self._move_held.discard(key_id)
             self._move_order = deque(k for k in self._move_order if k != key_id)
-            if key_id in ("T", "Y", "G", "H"):
-                self._arc_repeat_timer.stop()
+
             if self._move_order:
                 self._active_move_key = self._move_order[-1]
+                if self._active_move_key in ("T", "Y", "G", "H"):
+                    self._send_cmd(self._arc_turn_cmd())
+                    if not self._arc_repeat_timer.isActive():
+                        self._arc_repeat_timer.start()
+                    if not self._active_modifier:
+                        self._repeat_timer.stop()
+                else:
+                    self._send_cmd(self._movement_cmd(self._active_move_key))
+                    self._arc_repeat_timer.stop()
+                    if not self._repeat_timer.isActive():
+                        self._repeat_timer.start()
             else:
                 self._active_move_key = None
+                self._arc_repeat_timer.stop()
                 if not self._active_modifier:
                     self._repeat_timer.stop()
                 self._send_cmd("stop")
+
             self._update_motion_indicator(self._active_move_key)
         elif key_id in ("Shift", "Ctrl", "NumPlus", "NumMinus"):
             self._active_modifier = None

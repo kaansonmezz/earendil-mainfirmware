@@ -6,4 +6,4 @@
 ../Core/Src/motion_controller.c:57:6:MotionController_Execute	6
 ../Core/Src/motion_controller.c:99:6:MotionController_Stop	1
 ../Core/Src/motion_controller.c:106:6:MotionController_DisarmSafe	1
-../Core/Src/motion_controller.c:114:6:MotionController_ExecuteArcTurn	21
+../Core/Src/motion_controller.c:114:6:MotionController_ExecuteArcTurn	27

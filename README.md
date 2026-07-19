@@ -14,7 +14,7 @@ The H7 firmware provides:
 - Motor configuration readback cache through `cfgread` / `cfgcache`
 - Link-loss detection and UART diagnostics
 - MPU9250 IMU commands over I2C1
-- QMC5883P magnetometer commands over I2C1
+- QMC5883L magnetometer commands over I2C1
 - GUI-friendly telemetry lines for motor, IMU, and magnetometer data
 
 ---
@@ -32,7 +32,7 @@ The H7 firmware provides:
 | Rover drive type | Four-wheel skid-steer / differential drive |
 | IMU bus | I2C1 |
 | IMU target | MPU9250 / MPU6500-compatible accel/gyro block |
-| Magnetometer target | QMC5883P |
+| Magnetometer target | QMC5883L (addr 0x0D, chip ID 0xFF) |
 
 The H7 does **not** directly perform BLDC commutation. It sends command strings to the F411 motor-controller boards. The F411 boards handle motor-level commutation, Hall feedback, PWM generation, and low-level motor control.
 
@@ -115,7 +115,7 @@ Important firmware modules:
 | `Core/Src/activity_light.c` | Rover mode LED outputs |
 | `Core/Src/i2c_scanner.c` | I2C bus scan command |
 | `Core/Src/imu_mpu9250.c` | MPU9250/MPU6500 accel/gyro readout and filtering |
-| `Core/Src/mag_qmc5883p.c` | QMC5883P magnetometer readout |
+| `Core/Src/mag_qmc5883p.c` | QMC5883L magnetometer readout (filename legacy; sensor is QMC5883L) |
 | `Core/Inc/app_config.h` | UART mapping, buffer sizes, timeouts |
 | `Core/Inc/rover_types.h` | Shared motor, direction, link, and rover-mode types |
 
@@ -224,7 +224,7 @@ Expected devices:
 | Device | Typical 7-bit Address | Related Commands |
 |---|---:|---|
 | MPU9250 / MPU6500 accel-gyro | `0x68` or `0x69` | `mpuwho`, `mpuinit`, `mpuraw`, `mpuconv`, etc. |
-| QMC5883P magnetometer | `0x2C` typical in this firmware context | `magwho`, `maginit`, `magraw`, `magimu` |
+| QMC5883L magnetometer | `0x0D` (7-bit) | `magwho`, `maginit`, `magraw`, `magimu`, `magstatus` |
 
 Use proper I2C pull-up resistors on SCL/SDA if the sensor module does not already include them.
 
@@ -557,7 +557,7 @@ The firmware includes MPU9250/MPU6500-oriented I2C diagnostic and telemetry comm
 | `mpubiasoff` | Disable gyro bias correction |
 | `mpubiasclear` | Clear gyro bias to zero |
 
-GUI-friendly converted output includes an `MPU_IMU` line containing accel, gyro, temperature, bias/filter status, and OK flag.
+GUI-friendly converted output includes `MPU_GYRO` and `MPU_ACCEL` lines (split format, each sent at its own telemetry period) and a legacy combined `MPU_IMU` line from one-shot `mpuconv` reads. Each contains accel/gyro, temperature, bias/filter status, and OK flag.
 
 ---
 
@@ -568,7 +568,9 @@ GUI-friendly converted output includes an `MPU_IMU` line containing accel, gyro,
 | `imu help` | Show IMU command list |
 | `imu stream on` | Enable periodic IMU telemetry |
 | `imu stream off` | Disable periodic IMU telemetry |
-| `imu telper <MS>` | Set IMU telemetry period, typically 20–5000 ms |
+| `imu telper <MS>` | Set gyro+accel telemetry period (20–5000 ms, default 100) |
+| `gyro telper <MS>` | Set gyroscope-only telemetry period (20–5000 ms) |
+| `accel telper <MS>` | Set accelerometer-only telemetry period (20–5000 ms) |
 | `imu gyrofilter status` | Print gyro output filter settings |
 | `imu gyrofilter on` | Enable gyro output filter |
 | `imu gyrofilter off` | Disable gyro output filter |
@@ -591,8 +593,8 @@ imu lpf 100
 
 | Command | Description |
 |---|---|
-| `magwho` | Detect QMC5883P magnetometer |
-| `maginit` | Initialize QMC5883P |
+| `magwho` | Detect QMC5883L magnetometer |
+| `maginit` | Initialize QMC5883L (non-blocking state machine restart) |
 | `magraw` | Read raw magnetometer X/Y/Z |
 | `magimu` | Read compact GUI-friendly magnetometer X/Y/Z |
 | `maghelp` | Show magnetometer command list |
@@ -716,7 +718,7 @@ The included `earendil.py` GUI can use the terminal port to:
 - display UART/link error state
 - request motor tuning config with `cfgread`
 - show cached tuning config using `cfgcache`
-- display IMU converted telemetry from `MPU_IMU`
+- display IMU converted telemetry from `MPU_GYRO`, `MPU_ACCEL`, and legacy `MPU_IMU`
 - display magnetometer telemetry from `MAG_IMU`
 
 Recommended GUI flow for motor tuning panels:
