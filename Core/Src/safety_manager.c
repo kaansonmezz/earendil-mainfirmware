@@ -15,14 +15,22 @@ static volatile bool     recoveryPending[MOTOR_COUNT];
 
 /* ── PC/Pi control-link watchdog state ────────────────────────────────────
  *  Updated from main-loop context only (command_handler calls
- *  SafetyManager_NotifyPcActivity()).  The periodic check runs in
- *  SafetyManager_Update() which is also main-loop context, so no
- *  volatile qualifier is required for these variables. */
+ *  SafetyManager_NotifyPcActivity() or SafetyManager_NotifyPcHeartbeat()).
+ *  The periodic check runs in SafetyManager_Update() which is also
+ *  main-loop context, so no volatile qualifier is required. */
 static uint32_t pcLastActivityMs;
 static bool     pcLinkSeen;
 static bool     pcLinkAlive;
 static bool     pcLinkTimeoutLatched;
 static bool     pcRecoveryPending;
+
+/* ── PC heartbeat freshness (separate from activity freshness) ────────────
+ *  Only TCMD_HEARTBEAT updates this state.  Motion, stop, brake, and
+ *  mode commands refresh pcLastActivityMs but NOT pcLastHeartbeatMs.
+ *  MANUAL mode entry requires a fresh heartbeat — not merely fresh
+ *  activity — so that stale motion commands cannot authorize MANUAL. */
+static bool     pcHeartbeatSeen;
+static uint32_t pcLastHeartbeatMs;
 
 /* ── Private helpers ─────────────────────────────────────────────────────── */
 
@@ -55,6 +63,10 @@ void SafetyManager_Init(void)
     pcLinkAlive          = false;
     pcLinkTimeoutLatched = false;
     pcRecoveryPending    = false;
+
+    /* PC heartbeat freshness */
+    pcHeartbeatSeen      = false;
+    pcLastHeartbeatMs    = 0U;
 }
 
 void SafetyManager_Update(void)
@@ -91,22 +103,41 @@ void SafetyManager_Update(void)
     }
 
     /* ── PC/Pi control-link watchdog ──────────────────────────────────────
-     *  Only fires once per timeout transition (latch prevents repeat). */
+     *  Only fires once per timeout transition (latch prevents repeat).
+     *  Three-branch behaviour:
+     *    MANUAL     → STOP + DISARM (safety-critical: rover was moving)
+     *    AUTONOMOUS → mark link stale, no motor effect
+     *    DISARM     → no-op, motor safety sequence not re-run */
     if (pcLinkSeen && pcLinkAlive && !pcLinkTimeoutLatched)
     {
         if ((uint32_t)(now - pcLastActivityMs) >= PC_LINK_TIMEOUT_MS)
         {
-            /* One-shot timeout transition — safety actions first, then log. */
             pcLinkTimeoutLatched = true;
             pcLinkAlive = false;
 
-            /* Central stop-all + force DISARM (before logging) */
-            SafetyManager_EnterDisarm();
-            OperatingMode_Set(ROVER_MODE_DISARM);
+            switch (OperatingMode_Get())
+            {
+                case ROVER_MODE_MANUAL:
+                    SafetyManager_EnterDisarm();
+                    OperatingMode_Set(ROVER_MODE_DISARM);
+                    Logger_Log(LOG_ERROR,
+                               "[PC_LINK] TIMEOUT,AGE_MS:%lu,ACTION:STOP_DISARM",
+                               (unsigned long)(now - pcLastActivityMs));
+                    break;
 
-            Logger_Log(LOG_ERROR,
-                       "[PC_LINK] TIMEOUT,AGE_MS:%lu,ACTION:STOP_DISARM",
-                       (unsigned long)(now - pcLastActivityMs));
+                case ROVER_MODE_AUTONOMOUS:
+                    Logger_Log(LOG_WARN,
+                               "[PC_LINK] TIMEOUT,AGE_MS:%lu,ACTION:LINK_STALE",
+                               (unsigned long)(now - pcLastActivityMs));
+                    break;
+
+                case ROVER_MODE_DISARM:
+                default:
+                    Logger_Log(LOG_INFO,
+                               "[PC_LINK] TIMEOUT,AGE_MS:%lu,ACTION:NONE",
+                               (unsigned long)(now - pcLastActivityMs));
+                    break;
+            }
         }
     }
 
@@ -207,4 +238,29 @@ uint32_t SafetyManager_PcLinkAgeMs(void)
     if (pcLastActivityMs == 0U)
         return 0xFFFFFFFFU;  /* never received */
     return (uint32_t)(HAL_GetTick() - pcLastActivityMs);
+}
+
+/* ── PC heartbeat freshness (separate from activity freshness) ───────────── */
+
+void SafetyManager_NotifyPcHeartbeat(void)
+{
+    uint32_t now = HAL_GetTick();
+
+    /* If recovering from a timeout, flag the recovery log */
+    if (pcLinkTimeoutLatched || (pcLinkSeen && !pcLinkAlive))
+        pcRecoveryPending = true;
+
+    pcLastActivityMs     = now;  /* also keeps the activity watchdog alive */
+    pcLastHeartbeatMs    = now;
+    pcLinkSeen           = true;
+    pcLinkAlive          = true;
+    pcLinkTimeoutLatched = false;
+    pcHeartbeatSeen      = true;
+}
+
+bool SafetyManager_IsPcHeartbeatFresh(void)
+{
+    if (!pcHeartbeatSeen)
+        return false;
+    return ((uint32_t)(HAL_GetTick() - pcLastHeartbeatMs)) < PC_LINK_TIMEOUT_MS;
 }

@@ -4812,14 +4812,10 @@ class EarendilControlGui(QMainWindow):
             self._style_badge(self._colors()['accent_gold']))
         self._log_info(f"Connected to {host}:{port}")
 
-        # Start heartbeat — send one immediately, then periodically
+        # Query H7 mode — do not send heartbeat yet.
+        # The heartbeat timer starts only when MANUAL is confirmed.
         self._h7_link_status = "UNKNOWN"
         self._update_h7_link_badge()
-        self._send_heartbeat()
-        self._heartbeat_timer.start()
-        # Query link status several times after the first heartbeat.  Each
-        # callback captures this connection generation and is invalidated by
-        # disconnect/reconnect before it is allowed to write.
         sid = self._tcp_session_id
         self._start_linkstat_retries(sid)
 
@@ -6579,11 +6575,24 @@ class EarendilControlGui(QMainWindow):
         indicator only changes once a `[MODE] <NAME> active` confirmation line
         is received (see _parse_operating_mode_confirm).  A pending request
         is tracked so a timeout warning can be emitted if H7 does not reply.
+
+        Heartbeat policy:
+          MANUAL     → send hb first, then mode manual, start 500 ms timer
+          AUTONOMOUS → stop timer, send mode auto (no hb)
+          DISARM     → stop timer, send mode disarm (no hb)
         """
         cfg = self.OPERATING_MODES.get(mode_key)
         if cfg is None:
             return
-        self._send_cmd(cfg["command"])
+
+        if mode_key == "manual":
+            self._send_heartbeat()
+            self._send_cmd(cfg["command"])
+            self._heartbeat_timer.start()
+        else:
+            self._heartbeat_timer.stop()
+            self._send_cmd(cfg["command"])
+
         already_pending = self._pending_mode is not None
         self._pending_mode = mode_key
         self._pending_mode_timer.start()
@@ -7422,7 +7431,6 @@ class EarendilControlGui(QMainWindow):
         if state == QAbstractSocket.ConnectedState:
             session_id = self._begin_tcp_teardown(self.TCP_WINDOW_CLOSE)
             self._prepare_for_disconnect(stop_link_timers=False)
-            self._send_cmd("stop")
             self._stop_link_timers()
             if self._tcp_socket.state() == QAbstractSocket.ConnectedState:
                 self._tcp_socket.flush()

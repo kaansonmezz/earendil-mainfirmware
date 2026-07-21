@@ -4,7 +4,8 @@ tcp_uart_bridge.py — Raspberry Pi TCP-to-Serial Bridge for STM32H723 Rover
 
 Transparently forwards TCP bytes from a control PC to an H7 serial port
 and vice versa.  The bridge accepts a single active TCP client at a time
-and manages serial-port ownership, reconnect, and safety-stop behaviour.
+and manages serial-port ownership, reconnect, and disconnect-event
+behaviour.
 
 Third-party dependency (install on Raspberry Pi):
     python3 -m pip install pyserial
@@ -64,8 +65,8 @@ DEFAULT_SERIAL_READ_TIMEOUT: float = 0.05   # seconds
 DEFAULT_SERIAL_WRITE_TIMEOUT: float = 0.2   # seconds
 DEFAULT_SERIAL_RECONNECT_INTERVAL: float = 1.0  # seconds
 
-DEFAULT_SEND_STOP_ON_DISCONNECT: bool = True
-DEFAULT_STOP_COMMAND: str = "stop\r\n"
+DEFAULT_SEND_DISCONNECT_EVENT: bool = True
+DEFAULT_DISCONNECT_COMMAND: str = "pc_disconnect\r\n"
 
 DEFAULT_TCP_NODELAY: bool = True
 DEFAULT_TCP_KEEPALIVE: bool = True
@@ -111,8 +112,8 @@ class BridgeConfig:
     serial_read_timeout: float
     serial_write_timeout: float
     serial_reconnect_interval: float
-    send_stop_on_disconnect: bool
-    stop_command: str
+    send_disconnect_event: bool
+    disconnect_command: str
     tcp_nodelay: bool
     tcp_keepalive: bool
     log_level: str
@@ -214,7 +215,7 @@ class TcpSerialBridge:
         self._client_lock = threading.Lock()
         self._client_socket: Optional[socket.socket] = None
         self._client_addr: Optional[tuple[str, int]] = None
-        self._stop_sent_for_session = False
+        self._disconnect_event_sent_for_session = False
 
         # --- listener socket ---
         self._listener: Optional[socket.socket] = None
@@ -223,8 +224,8 @@ class TcpSerialBridge:
         self._threads: list[threading.Thread] = []
         self._threads_lock = threading.Lock()
 
-        # Pre-encode the stop command once.
-        self._stop_bytes: bytes = self._cfg.stop_command.encode("utf-8")
+        # Pre-encode the disconnect event command once.
+        self._disconnect_event_bytes: bytes = self._cfg.disconnect_command.encode("utf-8")
 
     # ------------------------------------------------------------------
     # Public entry point
@@ -282,12 +283,12 @@ class TcpSerialBridge:
         self._logger.info(
             "Configuration: host=%s  port=%d  serial=%s  baud=%d  "
             "read_timeout=%.3f  write_timeout=%.3f  reconnect_interval=%.3f  "
-            "stop_on_disconnect=%s  tcp_nodelay=%s  tcp_keepalive=%s  "
+            "disconnect_event_on_disconnect=%s  tcp_nodelay=%s  tcp_keepalive=%s  "
             "allowed_clients=%s  log_file=%s",
             c.host, c.port, c.serial_device, c.baud_rate,
             c.serial_read_timeout, c.serial_write_timeout,
             c.serial_reconnect_interval,
-            c.send_stop_on_disconnect, c.tcp_nodelay, c.tcp_keepalive,
+            c.send_disconnect_event, c.tcp_nodelay, c.tcp_keepalive,
             allowlist_str, c.log_file or "(stderr only)",
         )
 
@@ -555,7 +556,7 @@ class TcpSerialBridge:
                 self._configure_client_socket(client_sock)
                 self._client_socket = client_sock
                 self._client_addr = client_addr
-                self._stop_sent_for_session = False
+                self._disconnect_event_sent_for_session = False
 
                 # Clear stale serial RX before starting forwarding.
                 ser = self._get_serial()
@@ -722,8 +723,8 @@ class TcpSerialBridge:
             if self._client_socket is not client_sock:
                 return
 
-            # Send safety stop (once per session).
-            self._do_safety_stop("client disconnect")
+            # Send disconnect event (once per session).
+            self._send_disconnect_event("client disconnect")
 
             # Close the client socket.
             try:
@@ -745,27 +746,28 @@ class TcpSerialBridge:
                 client_addr[0], client_addr[1],
             )
 
-    def _do_safety_stop(self, reason: str) -> None:
-        """Send the safety-stop command to H7 over serial.
+    def _send_disconnect_event(self, reason: str) -> None:
+        """Send the disconnect event to H7 over serial.
 
         MUST be called with _client_lock held.
         Only sends once per client session.
         """
-        if self._stop_sent_for_session:
+        if self._disconnect_event_sent_for_session:
             return
-        self._stop_sent_for_session = True
+        self._disconnect_event_sent_for_session = True
 
-        if not self._cfg.send_stop_on_disconnect:
+        if not self._cfg.send_disconnect_event:
             self._logger.info(
-                "Disconnect stop disabled — not sending stop (%s)", reason
+                "Disconnect event disabled — not sending (%s)", reason
             )
             return
 
-        if self._write_serial_all(self._stop_bytes, f"safety-stop ({reason})"):
-            self._logger.info("Disconnect stop sent (%s)", reason)
+        if self._write_serial_all(self._disconnect_event_bytes,
+                                  f"disconnect-event ({reason})"):
+            self._logger.info("Disconnect event sent (%s)", reason)
         else:
             self._logger.warning(
-                "Disconnect stop could not be sent (%s)", reason
+                "Disconnect event could not be sent (%s)", reason
             )
 
     # ------------------------------------------------------------------
@@ -783,11 +785,11 @@ class TcpSerialBridge:
         self._logger.info("Graceful shutdown started")
         self._shutdown_event.set()
 
-        # Attempt a final stop if a client is still connected and serial
-        # is available.
+        # Attempt a final disconnect event if a client is still connected
+        # and serial is available.
         with self._client_lock:
             if self._client_socket is not None:
-                self._do_safety_stop("bridge shutdown")
+                self._send_disconnect_event("bridge shutdown")
 
                 try:
                     self._client_socket.shutdown(socket.SHUT_RDWR)
@@ -843,7 +845,7 @@ def _format_config_summary(config: BridgeConfig) -> str:
         f"read_timeout={config.serial_read_timeout}\n"
         f"write_timeout={config.serial_write_timeout}\n"
         f"reconnect_interval={config.serial_reconnect_interval}\n"
-        f"stop_on_disconnect={config.send_stop_on_disconnect}\n"
+        f"disconnect_event_on_disconnect={config.send_disconnect_event}\n"
         f"tcp_nodelay={config.tcp_nodelay}\n"
         f"tcp_keepalive={config.tcp_keepalive}\n"
         f"log_file={config.log_file or '(stderr only)'}\n"
@@ -949,10 +951,11 @@ def parse_args(argv: list[str] | None = None) -> BridgeConfig:
         ),
     )
     parser.add_argument(
+        "--disable-disconnect-event",
         "--disable-stop-on-disconnect",
         action="store_true",
-        default=not DEFAULT_SEND_STOP_ON_DISCONNECT,
-        help="Disable sending the safety stop command when the TCP client disconnects",
+        default=not DEFAULT_SEND_DISCONNECT_EVENT,
+        help="Disable sending the disconnect event when the TCP client disconnects",
     )
     parser.add_argument(
         "--allow-client",
@@ -1006,8 +1009,8 @@ def parse_args(argv: list[str] | None = None) -> BridgeConfig:
         serial_read_timeout=args.serial_read_timeout,
         serial_write_timeout=args.serial_write_timeout,
         serial_reconnect_interval=args.serial_reconnect_interval,
-        send_stop_on_disconnect=not args.disable_stop_on_disconnect,
-        stop_command=DEFAULT_STOP_COMMAND,
+        send_disconnect_event=not args.disable_disconnect_event,
+        disconnect_command=DEFAULT_DISCONNECT_COMMAND,
         tcp_nodelay=DEFAULT_TCP_NODELAY,
         tcp_keepalive=DEFAULT_TCP_KEEPALIVE,
         log_level=args.log_level,

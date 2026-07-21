@@ -99,7 +99,8 @@ typedef enum
     TCMD_CFGREAD,               /* cfgread FL|FR|RL|RR|all : request cfg from motor(s) */
     TCMD_ARM_RAW,               /* arm <payload> : raw text to manipulation F411 */
     TCMD_HB,                    /* hb / heartbeat : PC control-link keepalive */
-    TCMD_LINKSTAT               /* linkstat : diagnostic control-link status */
+    TCMD_LINKSTAT,              /* linkstat : diagnostic control-link status */
+    TCMD_PC_DISCONNECT          /* pc_disconnect : bridge disconnect event */
 } TerminalCommandType_t;
 
 /* ── Parse result ────────────────────────────────────────────────────────── */

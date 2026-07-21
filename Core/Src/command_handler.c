@@ -368,6 +368,7 @@ void CommandHandler_Handle(const TerminalCommand_t *cmd)
             case TCMD_CFGREAD:               /* cfgread (query) */
             case TCMD_HB:                    /* hb/heartbeat (keepalive) */
             case TCMD_LINKSTAT:              /* linkstat (diagnostic) */
+            case TCMD_PC_DISCONNECT:         /* pc_disconnect (bridge event) */
                 allowed = true;
                 break;
 
@@ -411,7 +412,7 @@ void CommandHandler_Handle(const TerminalCommand_t *cmd)
     /* ── Heartbeat: lightweight keepalive — no log, no ACK, no motor TX ── */
     if (cmd->type == TCMD_HB)
     {
-        SafetyManager_NotifyPcActivity();
+        SafetyManager_NotifyPcHeartbeat();
         return;
     }
 
@@ -429,32 +430,54 @@ void CommandHandler_Handle(const TerminalCommand_t *cmd)
         return;
     }
 
-    /* ── PC-link motion gate ─────────────────────────────────────────────
-     *  Motion and arc-turn commands are rejected when the PC link has
-     *  timed out or has never been established.  stop/brake/mode/status
-     *  and all diagnostic/query commands pass through unconditionally. */
-    if (cmd->type == TCMD_MOTION || cmd->type == TCMD_DRIVE_ARC)
+    /* ── pc_disconnect: bridge disconnect event ─────────────────────────
+     *  Does NOT refresh heartbeat or activity timestamps.
+     *  MANUAL     → STOP + DISARM (safety-critical: rover may be moving)
+     *  AUTONOMOUS → ignored (autonomous continues independently)
+     *  DISARM     → no-op */
+    if (cmd->type == TCMD_PC_DISCONNECT)
     {
-        if (!SafetyManager_IsPcLinkAlive())
+        switch (OperatingMode_Get())
         {
-            Logger_Log(LOG_ERROR,
-                       "[PC_LINK] Motion rejected: control link unavailable");
-            return;
+            case ROVER_MODE_MANUAL:
+                SafetyManager_EnterDisarm();
+                OperatingMode_Set(ROVER_MODE_DISARM);
+                Logger_Log(LOG_ERROR,
+                           "[PC_LINK] DISCONNECT,MODE:MANUAL,ACTION:STOP_DISARM");
+                break;
+
+            case ROVER_MODE_AUTONOMOUS:
+                Logger_Log(LOG_WARN,
+                           "[PC_LINK] DISCONNECT,MODE:AUTONOMOUS,ACTION:IGNORED");
+                break;
+
+            case ROVER_MODE_DISARM:
+            default:
+                Logger_Log(LOG_INFO,
+                           "[PC_LINK] DISCONNECT,MODE:DISARM,ACTION:NONE");
+                break;
         }
+        return;
     }
 
+    /* ── Motion commands: accepted in all modes ─────────────────────────
+     *  Motion is subject to the DISARM gate above (rejected while locked)
+     *  and to control-mode validation (RPM vs PWM), but not to PC-link
+     *  heartbeat or link-alive state.  AUTONOMOUS motion continues even
+     *  after a link timeout; MANUAL timeout forces DISARM which rejects
+     *  motion via the DISARM gate. */
+
     /* ── PC-link mode gate ──────────────────────────────────────────────
-     *  MANUAL and AUTONOMOUS require an active PC link.  DISARM is always
-     *  accepted regardless of link state.  This prevents a stale mode
-     *  command from reviving a dead link and enabling motion. */
-    if (cmd->type == TCMD_OP_MODE)
+     *  MANUAL requires a fresh heartbeat — not merely fresh activity —
+     *  so that stale motion/stop/brake commands cannot authorize MANUAL.
+     *  AUTONOMOUS and DISARM are always accepted regardless of link state. */
+    if (cmd->type == TCMD_OP_MODE &&
+        cmd->opMode == ROVER_MODE_MANUAL &&
+        !SafetyManager_IsPcHeartbeatFresh())
     {
-        if (cmd->opMode != ROVER_MODE_DISARM && !SafetyManager_IsPcLinkAlive())
-        {
-            Logger_Log(LOG_ERROR,
-                       "[PC_LINK] Mode rejected: control link unavailable");
-            return;
-        }
+        Logger_Log(LOG_ERROR,
+                   "[PC_LINK] MANUAL rejected: fresh heartbeat required");
+        return;
     }
 
     /* ── Refresh PC-link activity on accepted control commands ──────────

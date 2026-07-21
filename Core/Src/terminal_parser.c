@@ -558,6 +558,13 @@ bool TerminalParser_Parse(const char *line, TerminalCommand_t *outResult)
         return true;
     }
 
+    /* ── 5a3. pc_disconnect (bridge disconnect event) ───────────────── */
+    if (strcmp(buf, "pc_disconnect") == 0)
+    {
+        outResult->type = TCMD_PC_DISCONNECT;
+        return true;
+    }
+
     /* ── 5b. termstat (terminal RX queue diagnostics) ───────────────── */
     if (strcmp(buf, "termstat") == 0)
     {
